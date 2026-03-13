@@ -1,0 +1,71 @@
+# ============================================================
+# CompreEvalSystem — Docker Compose 一键部署
+#
+# 使用前提：
+#   1. 复制 .env.example 为 .env 并填写生产配置
+#   2. 执行：docker compose up -d --build
+#
+# 服务说明：
+#   mysql   — MySQL 8.0 数据库（内部端口 3306，不对外暴露）
+#   backend — Django + Uvicorn ASGI 应用（内部端口 8000）
+#   nginx   — 反向代理 + 静态/媒体文件服务（对外端口 80）
+# ============================================================
+
+services:
+
+  # ── MySQL 数据库 ────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_ROOT_HOST: "%"
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-time-zone=+08:00
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1",
+             "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # MySQL 不对外暴露端口，仅容器内部访问
+
+  # ── Django 后端 ─────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    # Docker 内 DB_HOST 必须指向 mysql 服务名
+    environment:
+      DB_HOST: mysql
+    volumes:
+      - ./media:/app/media          # 用户上传文件持久化到宿主机
+      - ./logs:/app/logs            # 日志持久化
+      - ./cache:/app/cache          # 文件缓存持久化
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  # ── Nginx 反向代理 ──────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./media:/app/media:ro       # Nginx 直接服务媒体文件（只读）
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
+    driver: local

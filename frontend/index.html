@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>校园综合测评管理系统</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      /* 动态视口高度回退：兼容不支持 dvh 的浏览器（微信/QQ/旧版 Chrome 等） */
+      !function(){function s(){document.documentElement.style.setProperty('--app-height',window.innerHeight+'px')}s();window.addEventListener('resize',s);window.addEventListener('orientationchange',function(){setTimeout(s,120)})}();
+    </script>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
