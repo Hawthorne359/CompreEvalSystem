@@ -66,7 +66,7 @@ export const useAuthStore = defineStore('auth', {
      */
     async _fetchPublicIp() {
       try {
-        const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(5000) })
+        const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(1500) })
         const json = await res.json()
         if (json.ip) {
           this.publicIp = json.ip
