@@ -47,7 +47,6 @@ COPY audit/ ./audit/
 COPY report/ ./report/
 COPY dashboard/ ./dashboard/
 COPY realtime/ ./realtime/
-COPY templates/ ./templates/
 
 # 将 Stage 1 构建的前端产物复制进来（Nginx 容器从此路径读取）
 COPY --from=node-builder /build/frontend/dist ./frontend/dist
