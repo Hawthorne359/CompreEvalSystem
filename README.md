@@ -156,5 +156,5 @@ CompreEvalSystem/
 ---
 
 <div align="center">
-  <sub>陕西理工大学 · 计算机科学与工程学院 · 2026</sub>
+  <sub>陕西理工大学 · 特莱恩工学院 · 2026</sub>
 </div>
