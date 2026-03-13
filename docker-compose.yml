@@ -1,9 +1,13 @@
 # ============================================================
-# CompreEvalSystem — Docker Compose 一键部署
+# CompreEvalSystem — Docker Compose
 #
-# 使用前提：
-#   1. 复制 .env.example 为 .env 并填写生产配置
-#   2. 执行：docker compose up -d --build
+# 本地开发（在本地电脑构建）：
+#   docker compose build
+#   docker compose up -d
+#
+# 生产服务器（拉取已推送到 Docker Hub 的镜像）：
+#   在 .env 中设置 IMAGE_NAME=你的DockerHub用户名/compre-eval-backend:latest
+#   docker compose up -d
 #
 # 服务说明：
 #   mysql   — MySQL 8.0 数据库（内部端口 3306，不对外暴露）
@@ -34,22 +38,21 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-    # MySQL 不对外暴露端口，仅容器内部访问
 
   # ── Django 后端 ─────────────────────────────────────────────
   backend:
+    image: ${IMAGE_NAME:-compre-eval-backend:latest}
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file: .env
-    # Docker 内 DB_HOST 必须指向 mysql 服务名
     environment:
       DB_HOST: mysql
     volumes:
-      - ./media:/app/media          # 用户上传文件持久化到宿主机
-      - ./logs:/app/logs            # 日志持久化
-      - ./cache:/app/cache          # 文件缓存持久化
+      - ./media:/app/media
+      - ./logs:/app/logs
+      - ./cache:/app/cache
     depends_on:
       mysql:
         condition: service_healthy
@@ -62,7 +65,7 @@ services:
       - "80:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./media:/app/media:ro       # Nginx 直接服务媒体文件（只读）
+      - ./media:/app/media:ro
     depends_on:
       - backend
 
