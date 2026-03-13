@@ -48,20 +48,25 @@ COPY report/ ./report/
 COPY dashboard/ ./dashboard/
 COPY realtime/ ./realtime/
 
-# 将 Stage 1 构建的前端产物复制进来（Nginx 容器从此路径读取）
+# 将 Stage 1 构建的前端产物复制进来
 COPY --from=node-builder /build/frontend/dist ./frontend/dist
 
-# 创建运行时目录（media/logs/cache 在容器外通过 volume 挂载，此处仅为保险）
-RUN mkdir -p media logs cache staticfiles
+# 创建运行时目录
+RUN mkdir -p media logs cache
 
 # 收集 Django 静态文件（admin CSS/JS 等）
-# 此时 .env 尚未挂载，使用默认值即可（STATIC_ROOT 不依赖环境变量）
 RUN python manage.py collectstatic --noinput
+
+# 把前端产物和静态文件暂存到 seed 目录
+# 容器启动时由 entrypoint 脚本复制到共享 volume（因为 volume 挂载会遮盖镜像层文件）
+RUN cp -r /app/frontend/dist /tmp/frontend_dist_seed && \
+    cp -r /app/staticfiles /tmp/staticfiles_seed
+
+# 复制启动脚本
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
 # 容器监听端口（Nginx 反代到此端口）
 EXPOSE 8000
 
-# 启动 Uvicorn（workers 数量可根据服务器 CPU 核数调整）
-CMD ["uvicorn", "CompreEvalSystem.asgi:application", \
-     "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "2", "--log-level", "info"]
+ENTRYPOINT ["/docker-entrypoint.sh"]
