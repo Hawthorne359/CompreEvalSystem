@@ -6,13 +6,13 @@ from users.models import Role
 
 
 # (code, name, level)；仅首次创建时用 name/level，之后可在后台改
+# 注意：admin/reviewer 已在 migration 0005_role_restructure 中合并删除，不在此列
 ROLES = [
-    ('student', '学生', 0),
-    ('counselor', '辅导员', 1),
-    ('reviewer', '评审教师', 2),
-    ('director', '院系主任', 3),
-    ('admin', '管理员', 4),
-    ('superadmin', '超级管理员', 5),
+    ('student',           '学生',               0),
+    ('student_assistant', '学生助理（评卷助理）', 1),
+    ('counselor',         '评审老师（辅导员）',   2),
+    ('director',          '院系主任',            3),
+    ('superadmin',        '超级管理员',           5),
 ]
 
 
