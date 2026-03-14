@@ -28,5 +28,5 @@ echo "==> 启动 Uvicorn..."
 exec uvicorn CompreEvalSystem.asgi:application \
     --host 0.0.0.0 \
     --port 8000 \
-    --workers 2 \
+    --workers 1 \
     --log-level info
