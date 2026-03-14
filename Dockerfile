@@ -62,7 +62,8 @@ RUN python manage.py collectstatic --noinput
 RUN cp -r /app/frontend/dist /tmp/frontend_dist_seed && \
     cp -r /app/staticfiles /tmp/staticfiles_seed
 
-# 复制启动脚本
+# 复制启动脚本（ARG 用于在需要时强制此层及之后不用缓存）
+ARG CACHE_BUST=1
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
