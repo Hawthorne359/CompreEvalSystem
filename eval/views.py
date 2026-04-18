@@ -1,6 +1,7 @@
 """
 测评周期、项目、指标与规则 API。
 """
+import json
 from django.core.cache import cache
 from django.db import transaction
 from rest_framework import generics, status
@@ -9,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
-from audit.models import OperationLog
+from audit.models import OperationLog, ImportPermissionRequest
 from audit.services import log_action
 from users.permissions import user_is_admin, user_level_at_least
 from users.role_resolver import (
@@ -281,6 +282,47 @@ def _can_manage_project_review_rule(user, project):
             user__class_obj_id__in=scope_class_ids
         ).exists()
         return not out_of_scope_exists
+    return False
+
+
+def _user_max_role_level(user):
+    """返回用户拥有角色中的最高等级。"""
+    from users.models import UserRole
+    from django.db.models import Max
+    result = UserRole.objects.filter(user=user).aggregate(max_level=Max('role__level'))
+    return result['max_level'] if result['max_level'] is not None else -1
+
+
+def _can_view_project_import_config(user, project):
+    """
+    导入配置查看权限：
+    按最高角色等级判定可见范围，避免降级后误提示“无权查看”。
+    """
+    from submission.models import StudentSubmission
+    from users.models import UserRole
+
+    max_level = _user_max_role_level(user)
+    if max_level >= ROLE_LEVEL_SUPERADMIN:
+        return True
+    if max_level >= ROLE_LEVEL_DIRECTOR:
+        if not user.department_id:
+            return False
+        return StudentSubmission.objects.filter(
+            project=project,
+            user__department_id=user.department_id,
+        ).exists()
+    if max_level >= ROLE_LEVEL_COUNSELOR:
+        scope_class_ids = list(
+            UserRole.objects.filter(
+                user=user, scope_type='class', scope_id__isnull=False
+            ).values_list('scope_id', flat=True)
+        )
+        if not scope_class_ids:
+            return False
+        return StudentSubmission.objects.filter(
+            project=project,
+            user__class_obj_id__in=scope_class_ids,
+        ).exists()
     return False
 
 
@@ -1042,9 +1084,15 @@ class ProjectImportConfigView(APIView):
         if student_field not in {'student_no', 'username'}:
             raise ValidationError({'student_field': '仅支持 student_no 或 username'})
 
+        import_mode = str(config.get('import_mode', 'subordinate_self')).strip()
+        if import_mode not in {'subordinate_self', 'upper_unified'}:
+            raise ValidationError({'import_mode': '仅支持 subordinate_self 或 upper_unified'})
+
         return {
             'student_field': student_field,
             'comment': str(config.get('comment', '批量导入')).strip() or '批量导入',
+            'import_mode': import_mode,
+            'subordinate_requires_approval': bool(config.get('subordinate_requires_approval', True)),
         }
 
     def get(self, request, project_id):
@@ -1052,7 +1100,7 @@ class ProjectImportConfigView(APIView):
             project = EvalProject.objects.get(pk=project_id)
         except EvalProject.DoesNotExist:
             return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
-        if not _can_manage_project_review_rule(request.user, project):
+        if not _can_view_project_import_config(request.user, project):
             raise PermissionDenied('您无权查看该项目导入配置')
         current_cfg = self._sanitize_import_config(project.import_config or {})
 
@@ -1094,11 +1142,42 @@ class ProjectImportConfigView(APIView):
                 tree['category'] = root.category
                 importable_indicators.append(tree)
 
+        max_level = _user_max_role_level(request.user)
+        import_policy = current_cfg
+        permission_status = 'not_needed'
+        can_import_now = True
+        if (
+            import_policy.get('import_mode') == 'upper_unified'
+            and max_level < ROLE_LEVEL_DIRECTOR
+            and import_policy.get('subordinate_requires_approval', True)
+        ):
+            pending_exists = ImportPermissionRequest.objects.filter(
+                project=project,
+                requester=request.user,
+                status=ImportPermissionRequest.STATUS_PENDING,
+            ).exists()
+            approved_exists = ImportPermissionRequest.objects.filter(
+                project=project,
+                requester=request.user,
+                status=ImportPermissionRequest.STATUS_APPROVED,
+            ).exists()
+            if approved_exists:
+                permission_status = 'approved'
+                can_import_now = True
+            elif pending_exists:
+                permission_status = 'pending'
+                can_import_now = False
+            else:
+                permission_status = 'none'
+                can_import_now = False
+
         return Response({
             'project_id': project.id,
             'project_name': project.name,
             'import_config': current_cfg,
             'importable_indicators': importable_indicators,
+            'import_permission_status': permission_status,
+            'can_import_now': can_import_now,
         })
 
     def patch(self, request, project_id):
@@ -1116,7 +1195,7 @@ class ProjectImportConfigView(APIView):
         project.save(update_fields=['import_config', 'updated_at'])
         log_action(
             user=request.user,
-            action='project_import_config_update',
+            action='import_policy_update',
             module=OperationLog.MODULE_EVAL,
             level=OperationLog.LEVEL_WARNING,
             target_type='eval_project',
@@ -1127,6 +1206,86 @@ class ProjectImportConfigView(APIView):
             request=request,
         )
         return Response({'detail': '导入配置已更新', 'import_config': new_cfg}, status=status.HTTP_200_OK)
+
+
+class ProjectReportVisibilityConfigView(APIView):
+    """
+    GET/PATCH /api/v1/projects/<project_id>/report-visibility/
+    学生报表可见策略配置（由直属评审老师配置）。
+    """
+    permission_classes = [IsAuthenticated]
+
+    DEFAULTS = {
+        'ranking_enabled': False,
+        'ranking_scope': 'class',
+        'show_peer_identity': False,
+        'show_total_score': True,
+        'show_indicator_breakdown': False,
+        'show_my_rank_in_class': True,
+        'show_my_rank_in_major': False,
+    }
+
+    @classmethod
+    def _sanitize(cls, raw):
+        cfg = raw or {}
+        if not isinstance(cfg, dict):
+            raise ValidationError({'report_visibility_config': '必须为对象'})
+        result = {}
+        for key, default in cls.DEFAULTS.items():
+            val = cfg.get(key, default)
+            if key == 'ranking_scope':
+                val = str(val).strip()
+                if val not in ('class', 'major'):
+                    raise ValidationError({'ranking_scope': '仅支持 class 或 major'})
+                result[key] = val
+            else:
+                result[key] = bool(val)
+        return result
+
+    def get(self, request, project_id):
+        try:
+            project = EvalProject.objects.get(pk=project_id)
+        except EvalProject.DoesNotExist:
+            return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
+        level = request.user.current_role.level if request.user.current_role else -1
+        if level < ROLE_LEVEL_COUNSELOR:
+            return Response({'detail': '仅评审老师及以上可查看此配置'}, status=status.HTTP_403_FORBIDDEN)
+        cfg = self._sanitize(project.report_visibility_config or {})
+        return Response({
+            'project_id': project.id,
+            'project_name': project.name,
+            'report_visibility_config': cfg,
+        })
+
+    def patch(self, request, project_id):
+        try:
+            project = EvalProject.objects.get(pk=project_id)
+        except EvalProject.DoesNotExist:
+            return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
+        level = request.user.current_role.level if request.user.current_role else -1
+        if level < ROLE_LEVEL_COUNSELOR:
+            return Response({'detail': '仅评审老师及以上可修改此配置'}, status=status.HTTP_403_FORBIDDEN)
+        payload = request.data.get('report_visibility_config', request.data)
+        new_cfg = self._sanitize(payload)
+        old_cfg = self._sanitize(project.report_visibility_config or {})
+        project.report_visibility_config = new_cfg
+        project.save(update_fields=['report_visibility_config', 'updated_at'])
+        log_action(
+            user=request.user,
+            action='report_visibility_update',
+            module=OperationLog.MODULE_EVAL,
+            level=OperationLog.LEVEL_WARNING,
+            target_type='eval_project',
+            target_id=project.id,
+            target_repr=project.name,
+            extra={'old': old_cfg, 'new': new_cfg},
+            is_audit_event=True,
+            request=request,
+        )
+        return Response({
+            'detail': '学生报表可见策略已更新',
+            'report_visibility_config': new_cfg,
+        }, status=status.HTTP_200_OK)
 
 
 def _template_sections_from_request(data):
@@ -1221,6 +1380,67 @@ def _project_has_submission_records(project):
     return StudentSubmission.objects.filter(project=project).exists()
 
 
+def _normalize_template_name(name):
+    """模板名标准化：去首尾空白、折叠中间空白并转小写。"""
+    text = str(name or '').strip()
+    text = ' '.join(text.split())
+    return text.lower()
+
+
+def _canonical_template_sections(sections):
+    """模板片段标准化：去重后排序，保证比较稳定。"""
+    allowed = {'basic', 'indicator', 'weight', 'review'}
+    if not isinstance(sections, list):
+        return []
+    normalized = []
+    for s in sections:
+        if s in allowed and s not in normalized:
+            normalized.append(s)
+    return sorted(normalized)
+
+
+def _canonical_template_payload(payload):
+    """模板 payload 标准化为稳定 JSON 字符串。"""
+    normalized = payload if isinstance(payload, dict) else {}
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def _template_scope_queryset(user, visibility):
+    """按可见范围返回模板查询集。"""
+    if visibility == 'private':
+        return EvalProjectConfigTemplate.objects.filter(created_by=user, visibility='private')
+    return EvalProjectConfigTemplate.objects.filter(visibility='global')
+
+
+def _find_template_name_conflict(user, name, visibility, exclude_id=None):
+    """同作用域内查找模板名称冲突（大小写/空白不敏感）。"""
+    target = _normalize_template_name(name)
+    if not target:
+        return None
+    qs = _template_scope_queryset(user, visibility).only('id', 'name')
+    if exclude_id is not None:
+        qs = qs.exclude(id=exclude_id)
+    for tpl in qs:
+        if _normalize_template_name(tpl.name) == target:
+            return tpl
+    return None
+
+
+def _find_template_payload_duplicate(user, visibility, include_sections, payload, exclude_id=None):
+    """同作用域内查找模板内容 100% 重复项。"""
+    target_sections = _canonical_template_sections(include_sections)
+    target_payload = _canonical_template_payload(payload)
+    qs = _template_scope_queryset(user, visibility).only('id', 'name', 'include_sections', 'payload')
+    if exclude_id is not None:
+        qs = qs.exclude(id=exclude_id)
+    for tpl in qs:
+        if _canonical_template_sections(tpl.include_sections or []) != target_sections:
+            continue
+        if _canonical_template_payload(tpl.payload or {}) == target_payload:
+            return tpl
+    return None
+
+
 class ProjectConfigTemplateListAPIView(generics.ListAPIView):
     """GET /api/v1/project-config-templates/ 项目配置模板列表。"""
     serializer_class = EvalProjectConfigTemplateSerializer
@@ -1232,6 +1452,115 @@ class ProjectConfigTemplateListAPIView(generics.ListAPIView):
         return EvalProjectConfigTemplate.objects.filter(
             Q(created_by=user) | Q(visibility='global')
         ).select_related('created_by').order_by('-updated_at', '-id')
+
+
+class ProjectConfigTemplateDetailAPIView(APIView):
+    """PATCH/DELETE /api/v1/project-config-templates/<template_id>/ 轻编辑/删除模板。"""
+    permission_classes = [IsAuthenticated]
+
+    def _get_template_or_response(self, template_id):
+        try:
+            return EvalProjectConfigTemplate.objects.get(pk=template_id), None
+        except EvalProjectConfigTemplate.DoesNotExist:
+            return None, Response({'detail': '模板不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+    def _check_manage_permission(self, request, tpl):
+        if not user_is_admin(request.user):
+            return Response({'detail': f'仅{get_role_display_name(ROLE_LEVEL_SUPERADMIN)}可管理项目模板'}, status=status.HTTP_403_FORBIDDEN)
+        if tpl.visibility == 'private' and tpl.created_by_id != request.user.id:
+            return Response({'detail': '无权管理该私有模板'}, status=status.HTTP_403_FORBIDDEN)
+        return None
+
+    def patch(self, request, template_id):
+        tpl, err = self._get_template_or_response(template_id)
+        if err:
+            return err
+        perm_err = self._check_manage_permission(request, tpl)
+        if perm_err:
+            return perm_err
+
+        name = request.data.get('name', tpl.name)
+        visibility = request.data.get('visibility', tpl.visibility)
+        name = (name or '').strip()
+        visibility = (visibility or '').strip() or tpl.visibility
+
+        if not name:
+            return Response({'detail': '模板名称不能为空'}, status=status.HTTP_400_BAD_REQUEST)
+        if visibility not in {'private', 'global'}:
+            return Response({'detail': 'visibility 仅支持 private/global'}, status=status.HTTP_400_BAD_REQUEST)
+
+        conflict = _find_template_name_conflict(
+            user=request.user,
+            name=name,
+            visibility=visibility,
+            exclude_id=tpl.id,
+        )
+        if conflict:
+            return Response(
+                {'detail': f'模板名称冲突：已存在同名模板「{conflict.name}」'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        duplicate = _find_template_payload_duplicate(
+            user=request.user,
+            visibility=visibility,
+            include_sections=tpl.include_sections or [],
+            payload=tpl.payload or {},
+            exclude_id=tpl.id,
+        )
+        if duplicate:
+            return Response(
+                {'detail': f'模板内容重复：与现有模板「{duplicate.name}」完全一致，请勿重复保留'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        changed = {}
+        if tpl.name != name:
+            changed['name'] = {'old': tpl.name, 'new': name}
+            tpl.name = name
+        if tpl.visibility != visibility:
+            changed['visibility'] = {'old': tpl.visibility, 'new': visibility}
+            tpl.visibility = visibility
+        if changed:
+            tpl.save(update_fields=['name', 'visibility', 'updated_at'])
+            log_action(
+                user=request.user,
+                action='project_config_template_update',
+                module=OperationLog.MODULE_EVAL,
+                level=OperationLog.LEVEL_WARNING,
+                target_type='eval_project_config_template',
+                target_id=tpl.id,
+                target_repr=tpl.name,
+                extra={'changed': changed},
+                is_audit_event=True,
+                request=request,
+            )
+        return Response(EvalProjectConfigTemplateSerializer(tpl).data, status=status.HTTP_200_OK)
+
+    def delete(self, request, template_id):
+        tpl, err = self._get_template_or_response(template_id)
+        if err:
+            return err
+        perm_err = self._check_manage_permission(request, tpl)
+        if perm_err:
+            return perm_err
+
+        target_id = tpl.id
+        target_name = tpl.name
+        target_visibility = tpl.visibility
+        tpl.delete()
+        log_action(
+            user=request.user,
+            action='project_config_template_delete',
+            module=OperationLog.MODULE_EVAL,
+            level=OperationLog.LEVEL_CRITICAL,
+            target_type='eval_project_config_template',
+            target_id=target_id,
+            target_repr=target_name,
+            extra={'visibility': target_visibility},
+            is_audit_event=True,
+            request=request,
+        )
+        return Response({'detail': f'模板“{target_name}”已删除'}, status=status.HTTP_200_OK)
 
 
 class ProjectConfigTemplateSaveAPIView(APIView):
@@ -1253,6 +1582,27 @@ class ProjectConfigTemplateSaveAPIView(APIView):
             return Response({'detail': 'visibility 仅支持 private/global'}, status=status.HTTP_400_BAD_REQUEST)
         sections = _template_sections_from_request(request.data)
         payload = _build_template_payload(project, sections)
+        conflict = _find_template_name_conflict(
+            user=request.user,
+            name=name,
+            visibility=visibility,
+        )
+        if conflict:
+            return Response(
+                {'detail': f'模板名称冲突：已存在同名模板「{conflict.name}」'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        duplicate = _find_template_payload_duplicate(
+            user=request.user,
+            visibility=visibility,
+            include_sections=sections,
+            payload=payload,
+        )
+        if duplicate:
+            return Response(
+                {'detail': f'模板内容重复：与现有模板「{duplicate.name}」完全一致，已拒绝保存'},
+                status=status.HTTP_409_CONFLICT,
+            )
         tpl = EvalProjectConfigTemplate.objects.create(
             name=name,
             visibility=visibility,
@@ -1388,3 +1738,172 @@ class ProjectConfigTemplateApplyAPIView(APIView):
             request=request,
         )
         return Response({'detail': '模板应用成功', 'project_id': project.id, 'template_id': tpl.id, 'sections': sections})
+
+
+TEMPLATE_EXPORT_VERSION = '1.0'
+TEMPLATE_EXPORT_APP = 'CompreEvalSystem'
+
+
+class ProjectConfigTemplateExportAPIView(APIView):
+    """GET /api/v1/project-config-templates/<template_id>/export/ 导出模板为 JSON 文件。"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, template_id):
+        if not user_is_admin(request.user):
+            return Response({'detail': f'仅{get_role_display_name(ROLE_LEVEL_SUPERADMIN)}可导出项目模板'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            tpl = EvalProjectConfigTemplate.objects.get(pk=template_id)
+        except EvalProjectConfigTemplate.DoesNotExist:
+            return Response({'detail': '模板不存在'}, status=status.HTTP_404_NOT_FOUND)
+        if tpl.visibility == 'private' and tpl.created_by_id != request.user.id:
+            return Response({'detail': '无权导出该私有模板'}, status=status.HTTP_403_FORBIDDEN)
+
+        import json
+        from django.utils import timezone
+        from django.http import HttpResponse
+        export_data = {
+            '__version': TEMPLATE_EXPORT_VERSION,
+            '__app': TEMPLATE_EXPORT_APP,
+            '__exported_at': timezone.now().isoformat(),
+            'name': tpl.name,
+            'include_sections': tpl.include_sections,
+            'payload': tpl.payload,
+        }
+        filename = tpl.name.replace(' ', '_').replace('/', '-') + '.json'
+        content = json.dumps(export_data, ensure_ascii=False, indent=2)
+        response = HttpResponse(content, content_type='application/json; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename*=UTF-8\'\'{filename}'
+        log_action(
+            user=request.user,
+            action='project_config_template_export',
+            module=OperationLog.MODULE_EVAL,
+            level=OperationLog.LEVEL_INFO,
+            target_type='eval_project_config_template',
+            target_id=tpl.id,
+            target_repr=tpl.name,
+            request=request,
+        )
+        return response
+
+
+class ProjectConfigTemplateImportAPIView(APIView):
+    """POST /api/v1/project-config-templates/import/ 从 JSON 文件导入模板到模板库。"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not user_is_admin(request.user):
+            return Response({'detail': f'仅{get_role_display_name(ROLE_LEVEL_SUPERADMIN)}可导入项目模板'}, status=status.HTTP_403_FORBIDDEN)
+        file_obj = request.FILES.get('file')
+        if not file_obj:
+            return Response({'detail': '请上传模板文件（file 字段）'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            raw = file_obj.read().decode('utf-8')
+            data = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            return Response({'detail': f'文件解析失败，请确认为有效的 JSON 文件：{e}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if data.get('__app') != TEMPLATE_EXPORT_APP:
+            return Response({'detail': '文件来源不匹配，仅支持从本系统导出的模板文件'}, status=status.HTTP_400_BAD_REQUEST)
+        supported_versions = {'1.0'}
+        if str(data.get('__version', '')) not in supported_versions:
+            return Response({'detail': f'不支持的模板版本：{data.get("__version")}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        name = (request.data.get('name') or data.get('name') or '').strip()
+        if not name:
+            return Response({'detail': '模板名称不能为空，请在请求体中提供 name 字段或确保文件中包含 name'}, status=status.HTTP_400_BAD_REQUEST)
+        visibility = (request.data.get('visibility') or 'private').strip()
+        if visibility not in {'private', 'global'}:
+            return Response({'detail': 'visibility 仅支持 private/global'}, status=status.HTTP_400_BAD_REQUEST)
+
+        include_sections = data.get('include_sections') or []
+        payload = data.get('payload') or {}
+        if not isinstance(include_sections, list) or not isinstance(payload, dict):
+            return Response({'detail': '文件格式错误：include_sections 应为列表，payload 应为对象'}, status=status.HTTP_400_BAD_REQUEST)
+        conflict = _find_template_name_conflict(
+            user=request.user,
+            name=name,
+            visibility=visibility,
+        )
+        if conflict:
+            return Response(
+                {'detail': f'模板名称冲突：已存在同名模板「{conflict.name}」'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        duplicate = _find_template_payload_duplicate(
+            user=request.user,
+            visibility=visibility,
+            include_sections=include_sections,
+            payload=payload,
+        )
+        if duplicate:
+            return Response(
+                {'detail': f'模板内容重复：与现有模板「{duplicate.name}」完全一致，已拒绝导入'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        tpl = EvalProjectConfigTemplate.objects.create(
+            name=name,
+            visibility=visibility,
+            created_by=request.user,
+            include_sections=include_sections,
+            payload=payload,
+        )
+        log_action(
+            user=request.user,
+            action='project_config_template_import',
+            module=OperationLog.MODULE_EVAL,
+            level=OperationLog.LEVEL_WARNING,
+            target_type='eval_project_config_template',
+            target_id=tpl.id,
+            target_repr=tpl.name,
+            extra={'sections': include_sections, 'visibility': visibility},
+            is_audit_event=True,
+            request=request,
+        )
+        return Response(EvalProjectConfigTemplateSerializer(tpl).data, status=status.HTTP_201_CREATED)
+
+
+class ProjectConfigExportDirectAPIView(APIView):
+    """POST /api/v1/projects/<project_id>/config-templates/export/ 将当前项目配置直接导出为 JSON 文件，不入库。"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, project_id):
+        if not user_is_admin(request.user):
+            return Response({'detail': f'仅{get_role_display_name(ROLE_LEVEL_SUPERADMIN)}可导出项目配置'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            project = EvalProject.objects.get(pk=project_id)
+        except EvalProject.DoesNotExist:
+            return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        import json
+        from django.utils import timezone
+        from django.http import HttpResponse
+
+        name = (request.data.get('name') or project.name or '项目配置').strip()
+        sections = _template_sections_from_request(request.data)
+        payload = _build_template_payload(project, sections)
+
+        export_data = {
+            '__version': TEMPLATE_EXPORT_VERSION,
+            '__app': TEMPLATE_EXPORT_APP,
+            '__exported_at': timezone.now().isoformat(),
+            'name': name,
+            'include_sections': sections,
+            'payload': payload,
+        }
+        filename = name.replace(' ', '_').replace('/', '-') + '.json'
+        content = json.dumps(export_data, ensure_ascii=False, indent=2)
+        response = HttpResponse(content, content_type='application/json; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename*=UTF-8\'\'{filename}'
+        log_action(
+            user=request.user,
+            action='project_config_export_direct',
+            module=OperationLog.MODULE_EVAL,
+            level=OperationLog.LEVEL_INFO,
+            target_type='eval_project',
+            target_id=project.id,
+            target_repr=project.name,
+            extra={'sections': sections},
+            request=request,
+        )
+        return response

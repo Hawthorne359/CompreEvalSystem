@@ -4,6 +4,21 @@
  */
 import api from './axios'
 
+async function resolveBlobErrorMessage(error, fallback = '请求失败，请稍后重试') {
+  const directDetail = error?.response?.data?.detail
+  if (directDetail) return String(directDetail)
+  const blob = error?.response?.data
+  if (!(blob instanceof Blob)) return fallback
+  try {
+    const text = await blob.text()
+    if (!text) return fallback
+    const parsed = JSON.parse(text)
+    return String(parsed?.detail || fallback)
+  } catch {
+    return fallback
+  }
+}
+
 /**
  * 审核任务列表
  * @param {Object} [params] - { status?: string, category?: 'all'|'disputed' }
@@ -125,16 +140,30 @@ export function commitScoreImport({ projectId, previewToken, excludedRows = [] }
  * @param {string} projectName - 项目名称（用于文件名）
  */
 export async function downloadImportTemplate(projectId, projectName) {
-  const resp = await api.get('/scoring/import/template/', {
-    params: { project_id: projectId },
-    responseType: 'blob',
-  })
-  const url = URL.createObjectURL(new Blob([resp.data]))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `导入模板_${projectName || projectId}.xlsx`
-  a.click()
-  URL.revokeObjectURL(url)
+  try {
+    const resp = await api.get('/scoring/import/template/', {
+      params: { project_id: projectId },
+      responseType: 'blob',
+    })
+    const url = URL.createObjectURL(new Blob([resp.data]))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `导入模板_${projectName || projectId}.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    const detail = await resolveBlobErrorMessage(error, '模板下载失败，请稍后重试')
+    throw new Error(detail)
+  }
+}
+
+/**
+ * 发起导入权限申请（直系上级审批）。
+ * @param {number} projectId
+ * @param {string} reason
+ */
+export function createImportPermissionRequest(projectId, reason) {
+  return api.post(`/projects/${projectId}/import-requests/`, { reason }).then((res) => res.data)
 }
 
 // ---------------------------------------------------------------------------

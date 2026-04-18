@@ -240,6 +240,7 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import { formatDateTime } from '@/utils/format'
 import { ROLE_LEVEL_ASSISTANT, ROLE_LEVEL_COUNSELOR, ROLE_LEVEL_DIRECTOR } from '@/constants/roles'
+import { openAlert, openPrompt } from '@/utils/dialog'
 import {
   deriveWorkflowSubmissionStatus,
   isDoneSubmission,
@@ -500,17 +501,39 @@ async function doHandleObjection(item, action) {
   let resolvedScore
   let resolutionComment = ''
   if (action === 'resolve') {
-    const scoreText = window.prompt('请输入裁定分数：')
-    if (scoreText == null) return
-    const scoreNum = Number(scoreText)
-    if (Number.isNaN(scoreNum)) {
-      window.alert('分数格式不正确')
-      return
-    }
+    const scoreInput = await openPrompt({
+      title: '裁定分数',
+      message: '请输入裁定分数：',
+      inputLabel: '裁定分数',
+      inputPlaceholder: '请输入数字',
+      inputRequired: true,
+      inputValidator: (value) => {
+        if (!value.trim()) return '请输入裁定分数'
+        if (Number.isNaN(Number(value))) return '分数格式不正确'
+        return ''
+      },
+      confirmText: '确认',
+    })
+    if (!scoreInput.confirmed) return
+    const scoreNum = Number(scoreInput.value)
     resolvedScore = scoreNum
-    resolutionComment = window.prompt('请输入处理意见（可留空）：') || ''
+    const commentInput = await openPrompt({
+      title: '处理意见',
+      message: '请输入处理意见（可留空）：',
+      inputLabel: '处理意见',
+      inputPlaceholder: '可留空',
+      confirmText: '确认',
+    })
+    resolutionComment = commentInput.confirmed ? (commentInput.value || '') : ''
   } else {
-    resolutionComment = window.prompt('请输入处理意见（可留空）：') || ''
+    const commentInput = await openPrompt({
+      title: '处理意见',
+      message: '请输入处理意见（可留空）：',
+      inputLabel: '处理意见',
+      inputPlaceholder: '可留空',
+      confirmText: '确认',
+    })
+    resolutionComment = commentInput.confirmed ? (commentInput.value || '') : ''
   }
   try {
     await handleReviewObjection(item.id, {
@@ -520,7 +543,11 @@ async function doHandleObjection(item, action) {
     })
     await Promise.all([loadList(), loadObjectionList()])
   } catch (e) {
-    window.alert(e.response?.data?.detail ?? '处理失败')
+    await openAlert({
+      title: '处理失败',
+      message: e.response?.data?.detail ?? '处理失败',
+      danger: true,
+    })
   }
 }
 

@@ -154,7 +154,9 @@
                   v-model="pageExportGroupBy"
                   class="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm">
             <option value="">不分组（平铺）</option>
-            <option value="class">按班级子目录</option>
+            <option v-if="allowedPageExportGroupByOptions.includes('class')" value="class">按班级子目录</option>
+            <option v-if="allowedPageExportGroupByOptions.includes('major')" value="major">按专业子目录</option>
+            <option v-if="allowedPageExportGroupByOptions.includes('department')" value="department">按院系子目录</option>
           </select>
           <button
             type="button"
@@ -219,10 +221,17 @@
               <table class="min-w-full border-collapse text-sm">
                 <thead>
                   <tr class="border-b border-slate-200 bg-slate-50">
-                    <th class="px-4 py-2.5 text-left font-medium text-slate-700">排名</th>
-                    <th class="px-4 py-2.5 text-left font-medium text-slate-700">学号</th>
-                    <th class="px-4 py-2.5 text-left font-medium text-slate-700">姓名</th>
-                    <th class="px-4 py-2.5 text-right font-medium text-slate-700">最终得分</th>
+                    <th class="whitespace-nowrap px-4 py-2.5 text-left font-medium text-slate-700">排名</th>
+                    <th class="whitespace-nowrap px-4 py-2.5 text-left font-medium text-slate-700">班级</th>
+                    <th class="whitespace-nowrap px-4 py-2.5 text-left font-medium text-slate-700">学号</th>
+                    <th class="whitespace-nowrap px-4 py-2.5 text-left font-medium text-slate-700">姓名</th>
+                    <th
+                      v-for="ind in ranking?.indicators"
+                      :key="ind.id"
+                      class="whitespace-nowrap px-4 py-2.5 text-right font-medium text-slate-700"
+                      :title="ind.max_score != null ? `满分 ${ind.max_score}` : ''"
+                    >{{ ind.name }}</th>
+                    <th class="whitespace-nowrap px-4 py-2.5 text-right font-medium text-slate-700">总分</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -238,12 +247,18 @@
                         :class="rankBadgeClass(row.rank)"
                       >{{ row.rank }}</span>
                     </td>
-                    <td class="px-4 py-2.5 text-slate-600">{{ row.student_no || row.username }}</td>
-                    <td class="px-4 py-2.5 text-slate-800">{{ row.real_name || row.username }}</td>
-                    <td class="px-4 py-2.5 text-right font-medium text-slate-800">{{ row.final_score ?? '—' }}</td>
+                    <td class="whitespace-nowrap px-4 py-2.5 text-slate-600">{{ row.class_name || '—' }}</td>
+                    <td class="whitespace-nowrap px-4 py-2.5 text-slate-600">{{ row.student_no || row.username }}</td>
+                    <td class="whitespace-nowrap px-4 py-2.5 text-slate-800">{{ row.real_name || row.username }}</td>
+                    <td
+                      v-for="ind in ranking?.indicators"
+                      :key="ind.id"
+                      class="whitespace-nowrap px-4 py-2.5 text-right text-slate-700"
+                    >{{ row.indicator_scores?.[String(ind.id)] ?? '—' }}</td>
+                    <td class="whitespace-nowrap px-4 py-2.5 text-right font-medium text-slate-800">{{ row.final_score ?? '—' }}</td>
                   </tr>
                   <tr v-if="!ranking?.results?.length">
-                    <td colspan="4" class="px-4 py-8 text-center text-slate-500">暂无排名数据</td>
+                    <td :colspan="4 + (ranking?.indicators?.length ?? 0) + 1" class="px-4 py-8 text-center text-slate-500">暂无排名数据</td>
                   </tr>
                 </tbody>
               </table>
@@ -395,7 +410,9 @@
                   v-model="pageExportGroupBy"
                   class="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm">
             <option value="">不分组（平铺）</option>
-            <option value="class">按班级子目录</option>
+            <option v-if="allowedPageExportGroupByOptions.includes('class')" value="class">按班级子目录</option>
+            <option v-if="allowedPageExportGroupByOptions.includes('major')" value="major">按专业子目录</option>
+            <option v-if="allowedPageExportGroupByOptions.includes('department')" value="department">按院系子目录</option>
           </select>
           <button
             type="button"
@@ -448,13 +465,21 @@
               <h3 class="font-medium text-slate-800">负责班级学生排名</h3>
               <span class="text-xs text-slate-500">共 {{ ranking?.total ?? 0 }} 条</span>
             </div>
-            <table class="w-full text-sm">
+            <div class="overflow-x-auto">
+            <table class="min-w-full border-collapse text-sm">
               <thead class="bg-slate-50 text-slate-600">
                 <tr>
-                  <th class="px-4 py-3 text-left">排名</th>
-                  <th class="px-4 py-3 text-left">学号</th>
-                  <th class="px-4 py-3 text-left">用户名</th>
-                  <th class="px-4 py-3 text-right">总分</th>
+                  <th class="whitespace-nowrap px-4 py-3 text-left">排名</th>
+                  <th class="whitespace-nowrap px-4 py-3 text-left">班级</th>
+                  <th class="whitespace-nowrap px-4 py-3 text-left">学号</th>
+                  <th class="whitespace-nowrap px-4 py-3 text-left">姓名</th>
+                  <th
+                    v-for="ind in ranking?.indicators"
+                    :key="ind.id"
+                    class="whitespace-nowrap px-4 py-3 text-right"
+                    :title="ind.max_score != null ? `满分 ${ind.max_score}` : ''"
+                  >{{ ind.name }}</th>
+                  <th class="whitespace-nowrap px-4 py-3 text-right">总分</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100">
@@ -462,12 +487,19 @@
                   <td class="px-4 py-3">
                     <span class="inline-flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold" :class="rankBadgeClass(item.rank)">{{ item.rank }}</span>
                   </td>
-                  <td class="px-4 py-3 text-slate-700">{{ item.student_no || '—' }}</td>
-                  <td class="px-4 py-3 text-slate-700">{{ item.username }}</td>
-                  <td class="px-4 py-3 text-right font-medium text-slate-800">{{ item.final_score ?? '—' }}</td>
+                  <td class="whitespace-nowrap px-4 py-3 text-slate-700">{{ item.class_name || '—' }}</td>
+                  <td class="whitespace-nowrap px-4 py-3 text-slate-700">{{ item.student_no || '—' }}</td>
+                  <td class="whitespace-nowrap px-4 py-3 text-slate-700">{{ item.real_name || item.username }}</td>
+                  <td
+                    v-for="ind in ranking?.indicators"
+                    :key="ind.id"
+                    class="whitespace-nowrap px-4 py-3 text-right text-slate-700"
+                  >{{ item.indicator_scores?.[String(ind.id)] ?? '—' }}</td>
+                  <td class="whitespace-nowrap px-4 py-3 text-right font-medium text-slate-800">{{ item.final_score ?? '—' }}</td>
                 </tr>
               </tbody>
             </table>
+            </div>
             <!-- 分页 -->
             <div v-if="ranking.total > rankingPageSize" class="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-sm text-slate-600">
               <span>共 {{ ranking.total }} 条</span>
@@ -492,343 +524,15 @@
       </div>
     </template>
 
-    <div v-if="exportConfigVisible" class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-      <div class="flex max-h-[92vh] w-full max-w-5xl flex-col rounded-xl bg-white shadow-xl">
-
-        <!-- 标题栏 -->
-        <div class="flex items-center justify-between border-b px-5 py-3">
-          <h3 class="text-base font-semibold text-slate-800">导出模板与映射配置</h3>
-          <button type="button" class="text-sm text-slate-500 hover:text-slate-700" @click="closeExportConfig">关闭</button>
-        </div>
-
-        <!-- 基础配置行 -->
-        <div class="border-b bg-slate-50 px-5 py-3 space-y-2">
-          <div class="flex flex-wrap items-center gap-3">
-            <select v-model="selectedMappingId" class="rounded border px-2 py-1.5 text-sm" @change="applySelectedMapping">
-              <option :value="null">新建映射配置</option>
-              <option v-for="item in mappingList" :key="item.id" :value="item.id">{{ item.name }}</option>
-            </select>
-            <input v-model.trim="mappingForm.name" type="text" class="w-40 rounded border px-2 py-1.5 text-sm" placeholder="映射名称" />
-            <select v-model="mappingForm.output_format" class="rounded border px-2 py-1.5 text-sm">
-              <option value="xlsx">Excel</option>
-              <option value="word">Word</option>
-              <option value="pdf">PDF</option>
-            </select>
-            <label class="flex items-center gap-1.5 text-sm text-slate-700">
-              <input v-model="mappingForm.is_default" type="checkbox" />
-              设为默认
-            </label>
-            <button
-              type="button"
-              class="flex items-center gap-1 rounded border border-slate-300 px-2 py-1.5 text-xs text-slate-600 hover:bg-white"
-              @click="templatePanelOpen = !templatePanelOpen"
-            >
-              <span>{{ selectedTemplateId ? templateList.find(t => t.id === selectedTemplateId)?.name || '模板已选' : '选择/上传模板' }}</span>
-              <span class="text-slate-400">{{ templatePanelOpen ? '▲' : '▼' }}</span>
-            </button>
-          </div>
-
-          <!-- 模板管理折叠面板 -->
-          <div v-if="templatePanelOpen" class="rounded border bg-white p-3 space-y-2">
-            <div class="grid gap-2 sm:grid-cols-4">
-              <input v-model.trim="templateForm.name" type="text" class="rounded border px-2 py-1.5 text-sm" placeholder="模板名称" />
-              <select v-model="templateForm.template_type" class="rounded border px-2 py-1.5 text-sm">
-                <option value="word">Word 模板</option>
-                <option value="excel">Excel 模板</option>
-              </select>
-              <select v-model="templateForm.visibility" class="rounded border px-2 py-1.5 text-sm">
-                <option value="private">仅自己可见</option>
-                <option v-if="isDirectorOrAdmin" value="department">院系可见</option>
-                <option v-if="isDirectorOrAdmin" value="global">全局可见</option>
-              </select>
-              <input type="file" class="text-sm" @change="onTemplateFileChange" />
-            </div>
-            <button type="button" class="rounded border border-brand-500 px-3 py-1.5 text-sm text-brand-700 hover:bg-brand-50" :disabled="uploadingTemplate" @click="uploadTemplate">
-              {{ uploadingTemplate ? '上传中…' : '上传模板' }}
-            </button>
-            <div class="max-h-32 overflow-auto rounded border">
-              <button
-                v-for="item in templateList"
-                :key="item.id"
-                type="button"
-                class="flex w-full items-center justify-between border-b px-3 py-2 text-left text-sm hover:bg-slate-50"
-                :class="selectedTemplateId === item.id ? 'bg-brand-50 font-medium text-brand-700' : ''"
-                @click="selectedTemplateId = item.id; templatePanelOpen = false"
-              >
-                <span class="truncate">{{ item.name }}</span>
-                <span class="ml-2 shrink-0 text-xs text-slate-500">{{ item.template_type }}</span>
-              </button>
-              <div v-if="templateList.length === 0" class="px-3 py-3 text-sm text-slate-400">暂无模板，请先上传</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Tab 切换 -->
-        <div class="flex border-b bg-white">
-          <button
-            v-for="tab in [{id:'fields',label:'字段选择'},{id:'excel',label:'Excel 列映射'},{id:'word',label:'Word/PDF 占位符'}]"
-            :key="tab.id"
-            type="button"
-            class="px-5 py-2.5 text-sm font-medium border-b-2 transition-colors"
-            :class="exportConfigTab === tab.id
-              ? 'border-brand-600 text-brand-700'
-              : 'border-transparent text-slate-500 hover:text-slate-700'"
-            @click="exportConfigTab = tab.id"
-          >
-            {{ tab.label }}
-            <span v-if="tab.id === 'excel'" class="ml-1 rounded-full bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">
-              {{ mappingForm.config.excel_columns?.length ?? 0 }}
-            </span>
-            <span v-if="tab.id === 'word'" class="ml-1 rounded-full bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">
-              {{ mappingForm.config.word_placeholders?.length ?? 0 }}
-            </span>
-          </button>
-        </div>
-
-        <!-- Tab 内容区 -->
-        <div class="flex-1 overflow-y-auto">
-
-          <!-- ===== Tab 1: 字段选择 ===== -->
-          <div v-show="exportConfigTab === 'fields'" class="flex h-full flex-col">
-            <!-- 工具栏 -->
-            <div class="flex flex-wrap items-center gap-2 border-b bg-slate-50 px-4 py-2">
-              <input v-model.trim="fieldKeyword" type="text" class="w-44 rounded border px-2 py-1.5 text-sm" placeholder="搜索字段名称/编码…" />
-              <label class="flex items-center gap-1.5 text-xs text-slate-600">
-                <input v-model="showAdvancedFields" type="checkbox" />
-                显示全部字段（含导入/评审/仲裁）
-              </label>
-              <label class="flex items-center gap-1.5 text-xs text-slate-600">
-                <input v-model="presetForm.include_base" type="checkbox" />
-                包含基础信息
-              </label>
-              <button type="button" class="rounded border border-slate-300 px-2 py-1.5 text-xs text-slate-700 hover:bg-white" @click="applyBuiltInLongFormPreset">一键生成常用占位符</button>
-            </div>
-
-            <!-- 树形区域 -->
-            <div class="flex-1 overflow-y-auto">
-              <!-- 综合汇总字段（submission 分组：总分、排名等） -->
-              <div v-if="summaryFields.length > 0" class="border-b border-slate-200">
-                <div class="flex items-center justify-between bg-slate-600 px-4 py-2.5 text-white">
-                  <span class="text-sm font-semibold">综合汇总</span>
-                  <span class="text-xs text-white/60">{{ summaryFields.length }} 个字段</span>
-                </div>
-                <div class="divide-y divide-slate-100">
-                  <div
-                    v-for="f in summaryFields"
-                    :key="f.key"
-                    class="flex cursor-pointer items-center justify-between px-4 py-1.5 hover:bg-slate-100"
-                    :class="selectedFieldKeys.has(f.key) ? 'bg-brand-50' : ''"
-                    @click="onTreeToggleField(f.key)"
-                  >
-                    <div class="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        class="h-3.5 w-3.5 cursor-pointer rounded"
-                        :checked="selectedFieldKeys.has(f.key)"
-                        @click.stop
-                        @change="onTreeToggleField(f.key)"
-                      />
-                      <span class="rounded bg-brand-100 px-1 text-xs text-brand-700">汇总</span>
-                      <span class="text-sm text-slate-700">{{ f.label }}</span>
-                      <span
-                        v-if="FIELD_TOOLTIPS[f.split_type] || FIELD_TOOLTIPS[f.key]"
-                        class="shrink-0 cursor-help select-none text-slate-400 hover:text-slate-600"
-                        :title="FIELD_TOOLTIPS[f.split_type] || FIELD_TOOLTIPS[f.key]"
-                      >ⓘ</span>
-                    </div>
-                    <code class="ml-2 shrink-0 select-all rounded bg-slate-200 px-1.5 py-0.5 text-xs text-slate-500">{{ f.key }}</code>
-                  </div>
-                </div>
-              </div>
-
-              <ExportFieldTreeNode
-                v-for="rootNode in filteredFieldTree"
-                :key="rootNode.id"
-                :node="rootNode"
-                :depth="0"
-                :selected-keys="selectedFieldKeys"
-                @toggle-field="onTreeToggleField"
-                @add-common="addAllNodeCommonFields"
-              />
-              <p v-if="filteredFieldTree.length === 0" class="py-8 text-center text-sm text-slate-400">暂无匹配字段，请先选择项目或检查搜索关键字</p>
-            </div>
-
-            <!-- 批量操作 sticky 底部 -->
-            <div class="sticky bottom-0 flex items-center justify-between border-t bg-white px-4 py-2.5">
-              <div class="flex items-center gap-2 text-sm text-slate-600">
-                <span class="font-medium text-brand-700">已选 {{ selectedFieldKeys.size }} 个字段</span>
-                <button v-if="selectedFieldKeys.size > 0" type="button" class="text-xs text-slate-400 hover:text-slate-600" @click="clearFieldSelection">清空选择</button>
-              </div>
-              <div class="flex items-center gap-2">
-                <button
-                  type="button"
-                  class="rounded border border-brand-500 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-40"
-                  :disabled="selectedFieldKeys.size === 0"
-                  @click="batchAddToWordPlaceholders"
-                >批量加入 Word 占位符</button>
-                <button
-                  type="button"
-                  class="rounded border border-slate-400 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-                  :disabled="selectedFieldKeys.size === 0"
-                  @click="batchAddToExcelColumns"
-                >批量加入 Excel 列</button>
-              </div>
-            </div>
-          </div>
-
-          <!-- ===== Tab 2: Excel 列映射 ===== -->
-          <div v-show="exportConfigTab === 'excel'" class="p-4">
-            <div class="mb-3 flex items-center justify-between">
-              <span class="text-sm font-medium text-slate-700">Excel 列映射</span>
-              <button type="button" class="rounded border border-brand-500 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50" @click="addExcelColumnMapping">+ 新增列</button>
-            </div>
-            <!-- 行号与表头写入配置 -->
-            <div class="mb-4 rounded border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
-              <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
-                <label class="flex items-center gap-2">
-                  <span class="shrink-0 text-xs font-medium text-slate-600">数据写入起始行：</span>
-                  <input
-                    v-model.number="mappingForm.config.data_start_row"
-                    type="number"
-                    min="1"
-                    class="w-16 rounded border border-slate-300 bg-white px-2 py-1 text-center text-sm font-mono focus:border-brand-500 focus:outline-none"
-                  />
-                  <span class="text-xs text-slate-400">（使用带合并标题的模板时，填入模板第一个数据行的行号，如第 8 行）</span>
-                </label>
-                <label class="flex cursor-pointer items-center gap-2">
-                  <input v-model="mappingForm.config.write_header" type="checkbox" class="cursor-pointer" />
-                  <span class="text-xs text-slate-700">写入表头行</span>
-                  <span class="text-xs text-slate-400">（使用模板时通常不勾选，以保留模板中的合并标题行）</span>
-                </label>
-              </div>
-            </div>
-            <!-- 静态单元格：共享元数据一次性写入指定单元格 -->
-            <div class="mb-4 rounded border border-slate-200 bg-slate-50 px-4 py-3">
-              <div class="mb-2 flex items-center justify-between">
-                <div>
-                  <span class="text-xs font-medium text-slate-700">静态单元格（写一次的共享信息）</span>
-                  <span class="ml-2 text-xs text-slate-400">如专业、年级、参评人数——只填入一次，不随学生数据循环重复</span>
-                </div>
-                <button type="button" class="rounded border border-brand-500 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50" @click="addStaticCellMapping">+ 新增</button>
-              </div>
-              <div class="space-y-2">
-                <div
-                  v-for="(sc, idx) in mappingForm.config.static_cells"
-                  :key="`sc-${idx}`"
-                  class="grid grid-cols-12 items-center gap-2"
-                >
-                  <input
-                    v-model.trim="sc.cell"
-                    type="text"
-                    class="col-span-2 rounded border border-slate-300 bg-white px-2 py-1.5 text-center text-sm font-mono focus:border-brand-500 focus:outline-none"
-                    placeholder="C3"
-                  />
-                  <select
-                    v-model="sc.field_key"
-                    :disabled="sc.aggregation === 'count'"
-                    class="col-span-7 rounded border border-slate-300 bg-white px-2 py-1.5 text-sm disabled:opacity-50"
-                  >
-                    <option value="">请选择字段</option>
-                    <option value="_count">参评人数（行数统计）</option>
-                    <optgroup v-for="group in groupedDisplayFields" :key="`sc-${group.id}`" :label="group.label">
-                      <option v-for="field in group.fields" :key="field.key" :value="field.key">{{ field.label }} ({{ field.key }})</option>
-                    </optgroup>
-                  </select>
-                  <select
-                    v-model="sc.aggregation"
-                    class="col-span-2 rounded border border-slate-300 bg-white px-2 py-1.5 text-sm"
-                  >
-                    <option value="first">取第一行值</option>
-                    <option value="count">行数统计</option>
-                  </select>
-                  <button type="button" class="col-span-1 text-center text-xs text-red-500 hover:text-red-700" @click="removeStaticCellMapping(idx)">删除</button>
-                </div>
-                <p v-if="!mappingForm.config.static_cells?.length" class="py-3 text-center text-xs text-slate-400">暂无静态单元格配置，点击"新增"添加（如：C3 → 专业名）</p>
-              </div>
-            </div>
-            <div class="space-y-2">
-              <div v-for="(row, idx) in mappingForm.config.excel_columns" :key="`excel-${idx}`" class="grid grid-cols-12 items-center gap-2">
-                <input v-model.trim="row.column" type="text" class="col-span-1 rounded border px-2 py-1.5 text-center text-sm font-mono" placeholder="A" />
-                <select v-model="row.field_key" class="col-span-8 rounded border px-2 py-1.5 text-sm">
-                  <option value="">请选择字段</option>
-                  <optgroup v-for="group in groupedDisplayFields" :key="`excel-${group.id}`" :label="group.label">
-                    <option v-for="field in group.fields" :key="field.key" :value="field.key">{{ field.label }} ({{ field.key }})</option>
-                  </optgroup>
-                </select>
-                <input v-model.trim="row.header" type="text" class="col-span-2 rounded border px-2 py-1.5 text-sm" placeholder="表头" />
-                <button type="button" class="col-span-1 text-center text-xs text-red-500 hover:text-red-700" @click="removeExcelColumnMapping(idx)">删除</button>
-              </div>
-              <p v-if="!mappingForm.config.excel_columns?.length" class="py-6 text-center text-sm text-slate-400">暂无列配置，点击"新增列"或从字段选择 Tab 批量加入</p>
-            </div>
-          </div>
-
-          <!-- ===== Tab 3: Word/PDF 占位符映射 ===== -->
-          <div v-show="exportConfigTab === 'word'" class="p-4">
-            <div class="mb-3 flex items-center justify-between">
-              <span class="text-sm font-medium text-slate-700">Word/PDF 占位符映射</span>
-              <button type="button" class="rounded border border-brand-500 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50" @click="addWordPlaceholderMapping">+ 新增占位符</button>
-            </div>
-            <p class="mb-3 text-xs text-slate-500">在 Word 模板中直接写 <code class="rounded bg-slate-100 px-1">@占位符名称</code>（如 @student_no、@A1-self），此处配置占位符对应的数据字段。</p>
-            <div class="space-y-2">
-              <div v-for="(row, idx) in mappingForm.config.word_placeholders" :key="`word-${idx}`" class="rounded border bg-slate-50/50 p-2">
-                <div class="grid grid-cols-12 items-center gap-2">
-                  <div class="col-span-1 text-center text-xs text-slate-400">@</div>
-                  <input v-model.trim="row.placeholder" type="text" class="col-span-4 rounded border bg-white px-2 py-1.5 text-sm font-mono" placeholder="占位符名称" />
-                  <select v-model="row.field_key" class="col-span-6 rounded border bg-white px-2 py-1.5 text-sm">
-                    <option value="">请选择对应字段</option>
-                    <optgroup v-for="group in groupedDisplayFields" :key="`word-${group.id}`" :label="group.label">
-                      <option v-for="field in group.fields" :key="field.key" :value="field.key">{{ field.label }} ({{ field.key }})</option>
-                    </optgroup>
-                  </select>
-                  <button type="button" class="col-span-1 text-center text-xs text-red-500 hover:text-red-700" @click="removeWordPlaceholderMapping(idx)">删除</button>
-                </div>
-                <div class="mt-1 flex items-center justify-between px-1 text-xs text-slate-400">
-                  <span>模板写法：<code class="rounded bg-slate-200 px-1 font-mono">{{ formatTokenPreview(row.placeholder) }}</code></span>
-                  <span class="truncate px-2">{{ getFieldDisplayName(row.field_key) }}</span>
-                  <button type="button" class="text-brand-600 hover:text-brand-800" @click="copyTokenPreview(row.placeholder)">复制</button>
-                </div>
-              </div>
-              <p v-if="!mappingForm.config.word_placeholders?.length" class="py-6 text-center text-sm text-slate-400">暂无占位符配置，点击"新增占位符"或从字段选择 Tab 批量加入</p>
-            </div>
-            <!-- ZIP 文件名模板配置 -->
-            <div v-if="mappingForm.output_format !== 'xlsx'" class="mt-4 rounded border border-dashed border-slate-300 bg-slate-50 p-3">
-              <label class="mb-1 block text-xs font-medium text-slate-600">ZIP 内文件名模板（多文件导出时生效）</label>
-              <input
-                v-model="mappingForm.config.zip_filename_pattern"
-                type="text"
-                class="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm font-mono"
-                placeholder="{student_no}_{real_name}"
-              />
-              <p class="mt-1 text-xs text-slate-400">可用变量：{student_no} {real_name} {class_name} {department} {rank} {username}。留空则默认使用 {real_name}。</p>
-            </div>
-          </div>
-
-        </div>
-
-        <!-- 底部操作栏 -->
-        <div class="sticky bottom-0 flex flex-wrap items-center justify-between gap-3 border-t bg-white px-5 py-3">
-          <div class="flex flex-wrap items-center gap-3">
-            <button type="button" class="rounded border border-brand-500 px-3 py-1.5 text-sm text-brand-700 hover:bg-brand-50" :disabled="savingMapping" @click="saveMapping">
-              {{ savingMapping ? '保存中…' : '保存映射' }}
-            </button>
-            <label v-if="mappingForm.output_format !== 'xlsx'" class="flex cursor-pointer items-center gap-1.5 text-xs text-slate-600">
-              <input v-model="pageExportMultiFile" type="checkbox" class="cursor-pointer" />
-              每人单独文件（ZIP）
-            </label>
-            <select v-if="mappingForm.output_format !== 'xlsx' && pageExportMultiFile"
-                    v-model="pageExportGroupBy"
-                    class="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm">
-              <option value="">不分组（平铺）</option>
-              <option value="class">按班级子目录</option>
-            </select>
-            <button type="button" class="rounded border border-green-600 px-3 py-1.5 text-sm text-green-700 hover:bg-green-50" :disabled="exporting" @click="doConfiguredExport">
-              使用该配置导出
-            </button>
-          </div>
-          <p v-if="configError" class="text-sm text-red-600">{{ configError }}</p>
-        </div>
-      </div>
-    </div>
+    <ExportWorkspace
+      :visible="exportConfigVisible"
+      :project-id="selectedProjectId"
+      :project-name="selectedProjectName"
+      :is-director-or-admin="isDirectorOrAdmin"
+      :filter-params="getFilterParams()"
+      @close="closeExportConfig"
+      @mappings-updated="handleMappingsUpdated"
+    />
 
   </div>
 </template>
@@ -839,7 +543,7 @@
  * - 学生：展示本人各项目最终得分与得分明细（GET /report/student/me/）。
  * - 主任/管理员：选择项目后查看班级汇总（summary）与总分排名（ranking），并可导出 Excel/PDF。
  */
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { getSeasons, getSeasonProjects } from '@/api/eval'
@@ -848,6 +552,7 @@ import {
   getProjectSummary,
   getProjectRanking,
   exportReport,
+  exportReportWithCompat,
   getExportFields,
   getExportTemplates,
   createExportTemplate,
@@ -861,7 +566,7 @@ import {
 import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import { formatDateTime } from '@/utils/format'
 import { deriveSubmissionDisplayStatus } from '@/utils/submissionStatus'
-import ExportFieldTreeNode from './ExportFieldTreeNode.vue'
+import ExportWorkspace from './report-export/ExportWorkspace.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -1020,6 +725,11 @@ const mappingForm = ref({
     ],
     word_placeholders: [],
     zip_filename_pattern: '',
+    computed_fields: [],
+    reviewer_signature_policy: {
+      source: 'actual_scored',
+      include_arbitration: false,
+    },
   },
 })
 const totalPages = computed(() =>
@@ -1048,6 +758,20 @@ const pageExportFormat = ref('xlsx')
 const pageExportMappingId = ref(null)
 const pageExportMultiFile = ref(false)
 const pageExportGroupBy = ref('')  // '' = 不分组, 'class' = 按班级子目录
+
+const allowedPageExportGroupByOptions = computed(() => {
+  if (currentLevel.value >= 5) return ['class', 'major', 'department']
+  if (currentLevel.value >= 3) return ['class', 'major']
+  if (currentLevel.value >= 2) return ['class']
+  return []
+})
+
+function ensurePageExportGroupByAllowed() {
+  if (!pageExportGroupBy.value) return true
+  if (allowedPageExportGroupByOptions.value.includes(pageExportGroupBy.value)) return true
+  pageExportGroupBy.value = ''
+  return false
+}
 
 /**
  * @description 当前筛选参数（空值自动剔除）。
@@ -1401,49 +1125,9 @@ async function refreshTemplateAndMappings() {
 
 async function openExportConfig() {
   if (!selectedProjectId.value) return
-  exportConfigVisible.value = true
-  exportConfigTab.value = 'fields'
-  selectedFieldKeys.value = new Set()
-  expandedModules.value = {}
-  expandedIndicators.value = {}
+  await refreshTemplateAndMappings()
   configError.value = ''
-  try {
-    const [fieldResp] = await Promise.all([
-      getExportFields(selectedProjectId.value, { view_mode: fieldViewMode.value }),
-      refreshTemplateAndMappings(),
-    ])
-    exportFields.value = fieldResp.fields || []
-    allExportFields.value = fieldResp.all_fields || fieldResp.fields || []
-    fieldGroups.value = fieldResp.field_groups || []
-    fieldTree.value = fieldResp.field_tree || []
-    exportPresets.value = fieldResp.presets || []
-    applyTreeFallbackFromFlat()
-    ensureTreeExpanded()
-    fieldViewMode.value = fieldResp.field_view_mode || fieldViewMode.value
-    // Auto-populate preset module selection from actual tree modules
-    presetForm.value.modules = (fieldTree.value || []).map((m) => m.category || String(m.id))
-    if (mappingList.value.length) {
-      const prefer = mappingList.value.find((x) => x.id === selectedMappingId.value)
-        || mappingList.value.find((x) => x.is_default)
-        || mappingList.value[0]
-      selectedMappingId.value = prefer?.id ?? null
-      mappingForm.value.name = prefer.name
-      mappingForm.value.output_format = prefer.output_format
-      mappingForm.value.is_default = !!prefer.is_default
-      mappingForm.value.config = normalizeMappingConfig(prefer.config)
-      if (prefer.template) {
-        const templateExists = (templateList.value || []).some((t) => t.id === prefer.template)
-        if (templateExists) {
-          selectedTemplateId.value = prefer.template
-        } else {
-          selectedTemplateId.value = null
-          configError.value = '当前映射关联的模板已失效，请重新选择模板并保存映射'
-        }
-      }
-    }
-  } catch (e) {
-    configError.value = e.response?.data?.detail ?? '加载导出配置失败'
-  }
+  exportConfigVisible.value = true
 }
 
 /**
@@ -1452,6 +1136,12 @@ async function openExportConfig() {
  */
 function closeExportConfig() {
   exportConfigVisible.value = false
+  configError.value = ''
+}
+
+function handleMappingsUpdated(nextMappings = []) {
+  mappingList.value = Array.isArray(nextMappings) ? nextMappings : []
+  onPageExportFormatChange()
 }
 
 /**
@@ -1480,6 +1170,11 @@ function normalizeMappingConfig(cfg = {}) {
     excel_columns: Array.isArray(cfg.excel_columns) && cfg.excel_columns.length ? cfg.excel_columns : defaultColumns,
     word_placeholders: Array.isArray(cfg.word_placeholders) ? cfg.word_placeholders : [],
     zip_filename_pattern: cfg.zip_filename_pattern ?? '',
+    computed_fields: Array.isArray(cfg.computed_fields) ? cfg.computed_fields : [],
+    reviewer_signature_policy: {
+      source: cfg.reviewer_signature_policy?.source || 'actual_scored',
+      include_arbitration: !!cfg.reviewer_signature_policy?.include_arbitration,
+    },
   }
 }
 
@@ -1969,11 +1664,14 @@ function applySelectedMapping() {
  */
 async function doConfiguredExport() {
   if (!selectedProjectId.value) return
+  const outputFormat = String(mappingForm.value.output_format || '').toLowerCase()
   exporting.value = true
   exportError.value = ''
   configError.value = ''
   try {
-    const outputFormat = String(mappingForm.value.output_format || '').toLowerCase()
+    if (!ensurePageExportGroupByAllowed()) {
+      throw new Error('当前角色不支持该分组维度，已重置为不分组')
+    }
     if ((outputFormat === 'word' || outputFormat === 'pdf') && !selectedTemplateId.value) {
       throw new Error('当前映射未绑定 Word 模板，请先在模板列表选择模板并保存映射')
     }
@@ -1985,8 +1683,11 @@ async function doConfiguredExport() {
     }
     await exportReport(selectedProjectId.value, mappingForm.value.output_format, selectedProjectName.value, {
       mapping_id: selectedMappingId.value || undefined,
-      ...(String(mappingForm.value.output_format || '').toLowerCase() !== 'xlsx' && pageExportMultiFile.value
-        ? { multi_file: 'true' }
+      ...(String(mappingForm.value.output_format || '').toLowerCase() !== 'xlsx'
+        ? {
+            group_file_mode: pageExportMultiFile.value ? 'per_student_file' : 'single_file',
+            multi_file: pageExportMultiFile.value ? 'true' : 'false',
+          }
         : {}),
       ...(String(mappingForm.value.output_format || '').toLowerCase() !== 'xlsx' && pageExportMultiFile.value && pageExportGroupBy.value
         ? { group_by: pageExportGroupBy.value }
@@ -1995,6 +1696,27 @@ async function doConfiguredExport() {
     })
   } catch (e) {
     const msg = e?.response?.data?.detail || e?.message || '配置导出失败'
+    if (outputFormat === 'pdf' && String(msg).includes('PDF 转换失败')) {
+      try {
+        await exportReport(selectedProjectId.value, 'word', selectedProjectName.value, {
+          mapping_id: selectedMappingId.value || undefined,
+          group_file_mode: pageExportMultiFile.value ? 'per_student_file' : 'single_file',
+          multi_file: pageExportMultiFile.value ? 'true' : 'false',
+          ...(pageExportMultiFile.value && pageExportGroupBy.value
+            ? { group_by: pageExportGroupBy.value }
+            : {}),
+          ...getFilterParams(),
+        })
+        exportError.value = '当前服务器暂不支持 PDF 模板转换，已自动为你导出 Word（版式与模板一致）'
+        configError.value = exportError.value
+        return
+      } catch (fallbackErr) {
+        const fallbackMsg = fallbackErr?.response?.data?.detail || fallbackErr?.message || '自动回退导出 Word 失败'
+        exportError.value = `PDF 转换不可用，且回退导出 Word 失败：${fallbackMsg}`
+        configError.value = exportError.value
+        return
+      }
+    }
     if (String(msg).includes('映射') && String(msg).includes('不存在')) {
       selectedMappingId.value = null
       configError.value = '所选映射已失效，已自动清空，请重新选择后再导出'
@@ -2022,22 +1744,61 @@ async function doConfiguredExport() {
  */
 async function doPageDrivenExport() {
   if (!selectedProjectId.value) return
+  const format = pageExportFormat.value
   exporting.value = true
   exportError.value = ''
   try {
-    const format = pageExportFormat.value
+    if (!ensurePageExportGroupByAllowed()) {
+      throw new Error('当前角色不支持该分组维度，已重置为不分组')
+    }
     const selected = pageExportMappingCandidates.value.find((x) => x.id === pageExportMappingId.value) || null
     const params = {
       ...getFilterParams(),
       mapping_id: selected?.id || undefined,
-      ...(format !== 'xlsx' && pageExportMultiFile.value ? { multi_file: 'true' } : {}),
+      ...(format !== 'xlsx'
+        ? {
+            group_file_mode: pageExportMultiFile.value ? 'per_student_file' : 'single_file',
+            multi_file: pageExportMultiFile.value ? 'true' : 'false',
+          }
+        : {}),
       ...(format !== 'xlsx' && pageExportMultiFile.value && pageExportGroupBy.value
         ? { group_by: pageExportGroupBy.value }
         : {}),
     }
-    await exportReport(selectedProjectId.value, format, selectedProjectName.value, params)
+    await exportReportWithCompat({
+      projectId: selectedProjectId.value,
+      format,
+      projectName: selectedProjectName.value,
+      extraParams: params,
+    })
   } catch (e) {
     const msg = e?.response?.data?.detail || e?.message || '导出失败'
+    if (format === 'pdf' && String(msg).includes('PDF 转换失败')) {
+      const selected = pageExportMappingCandidates.value.find((x) => x.id === pageExportMappingId.value) || null
+      const params = {
+        ...getFilterParams(),
+        mapping_id: selected?.id || undefined,
+        group_file_mode: pageExportMultiFile.value ? 'per_student_file' : 'single_file',
+        multi_file: pageExportMultiFile.value ? 'true' : 'false',
+        ...(pageExportMultiFile.value && pageExportGroupBy.value
+          ? { group_by: pageExportGroupBy.value }
+          : {}),
+      }
+      try {
+        await exportReportWithCompat({
+          projectId: selectedProjectId.value,
+          format: 'word',
+          projectName: selectedProjectName.value,
+          extraParams: params,
+        })
+        exportError.value = '当前服务器暂不支持 PDF 模板转换，已自动为你导出 Word（版式与模板一致）'
+        return
+      } catch (fallbackErr) {
+        const fallbackMsg = fallbackErr?.response?.data?.detail || fallbackErr?.message || '自动回退导出 Word 失败'
+        exportError.value = `PDF 转换不可用，且回退导出 Word 失败：${fallbackMsg}`
+        return
+      }
+    }
     if (String(msg).includes('映射') && String(msg).includes('不存在')) {
       pageExportMappingId.value = null
       await refreshTemplateAndMappings()
@@ -2100,25 +1861,24 @@ function onPageExportFormatChange() {
     const prefer = pageExportMappingCandidates.value.find((x) => x.is_default) || pageExportMappingCandidates.value[0]
     pageExportMappingId.value = prefer?.id ?? null
   }
+  if (pageExportFormat.value === 'xlsx') pageExportGroupBy.value = ''
+  ensurePageExportGroupByAllowed()
 }
+
+watch([allowedPageExportGroupByOptions, pageExportMultiFile, pageExportFormat], () => {
+  if (!pageExportMultiFile.value || pageExportFormat.value === 'xlsx') {
+    pageExportGroupBy.value = ''
+    return
+  }
+  if (pageExportGroupBy.value && !allowedPageExportGroupByOptions.value.includes(pageExportGroupBy.value)) {
+    pageExportGroupBy.value = ''
+    exportError.value = '当前角色不支持该分组维度，已自动重置为不分组'
+  }
+})
 
 useRealtimeRefresh('score', () => {
   if (isStudent.value) loadMyReport()
   else if (isDirectorOrAdmin.value || isCounselor.value) loadSeasons()
-})
-
-// 选择/取消 Excel 模板时自动切换 write_header 默认值：
-// 有模板时默认不写表头（保留模板合并标题行）；无模板时默认写表头。
-watch(selectedTemplateId, (newId) => {
-  if (mappingForm.value.output_format === 'xlsx') {
-    // 只在用户未手动改过时（即仍是"默认"值）才自动切换
-    const cfg = mappingForm.value.config
-    if (newId) {
-      cfg.write_header = false
-    } else {
-      cfg.write_header = true
-    }
-  }
 })
 
 onMounted(() => {

@@ -105,6 +105,7 @@ import { ref, computed } from 'vue'
 import { getAssistantList, assignAssistant, revokeAssistant } from '@/api/review'
 import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import { useRoleMetaStore } from '@/stores/roles'
+import { openAlert } from '@/utils/dialog'
 
 const roleMeta = useRoleMetaStore()
 const assistantLabel = computed(() => roleMeta.nameByLevel(1))
@@ -207,7 +208,11 @@ async function doRevoke(stu) {
     })
     await loadAssistants()
   } catch (e) {
-    alert(e.response?.data?.detail ?? '撤销失败')
+    await openAlert({
+      title: '撤销失败',
+      message: e.response?.data?.detail ?? '撤销失败',
+      danger: true,
+    })
   } finally {
     revoking.value = null
   }

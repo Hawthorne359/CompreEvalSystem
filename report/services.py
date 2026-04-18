@@ -6,7 +6,10 @@ from __future__ import annotations
 import io
 import os
 import re
+import shutil
+import subprocess
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote
 
@@ -14,7 +17,7 @@ from django.db.models import Q
 from django.http import HttpResponse
 
 from eval.models import EvalIndicator
-from scoring.models import ArbitrationRecord, ImportedScoreDetail, ScoreRecord
+from scoring.models import ArbitrationRecord, ImportedScoreDetail, ReviewAssignment, ScoreRecord
 from scoring.services import get_indicator_final_score
 from submission.models import Evidence, StudentSubmission, SubmissionAnswer
 from users.permissions import user_level_at_least
@@ -79,6 +82,8 @@ FIELD_VIEW_MODE_TEMPLATE_COMMON = 'template_common_first'
 FIELD_VIEW_MODE_ADVANCED_ALL = 'advanced_all_fields'
 _EXCEL_COLUMN_RE = re.compile(r'^[A-Za-z]{1,3}$')
 _CELL_RE = re.compile(r'^[A-Za-z]{1,3}[1-9]\d*$')
+SUPPORTED_GROUP_BY = {'', 'none', 'class', 'major', 'department'}
+SUPPORTED_GROUP_FILE_MODE = {'single_file', 'per_group_file', 'per_student_file'}
 
 COMMON_BASE_KEYS = {
     'season_academic_year',
@@ -122,6 +127,12 @@ BASE_FIELDS = [
     {'key': 'submitted_at', 'label': '提交时间', 'category_id': 'submission', 'order': 20},
     {'key': 'remark', 'label': '提交备注', 'category_id': 'submission', 'order': 21},
     {'key': 'final_score', 'label': '总分', 'category_id': 'submission', 'order': 22, 'is_common': True},
+    {'key': 'scope_valid_submission_count', 'label': '参加测评人数', 'category_id': 'submission', 'order': 22.1, 'is_common': True},
+    {'key': 'scope_missing_submission_count', 'label': '未参加测评人数', 'category_id': 'submission', 'order': 22.2, 'is_common': True},
+    {'key': 'scope_total_submission_count', 'label': '应参加总人数', 'category_id': 'submission', 'order': 22.3},
+    {'key': 'reviewer_signatures_all', 'label': '测评小组成员签名（全部）', 'category_id': 'submission', 'order': 22.4, 'is_common': True},
+    {'key': 'reviewer_signatures_teachers', 'label': '测评小组成员签名（评审老师）', 'category_id': 'submission', 'order': 22.5},
+    {'key': 'reviewer_signatures_assistants', 'label': '测评小组成员签名（学生助理）', 'category_id': 'submission', 'order': 22.6},
     {'key': 'global_evidence_count', 'label': '全局佐证数量', 'category_id': 'evidence', 'order': 23},
     {'key': 'global_evidence_names', 'label': '全局佐证名称列表', 'category_id': 'evidence', 'order': 24},
     {'key': 'global_evidence_urls', 'label': '全局佐证链接列表', 'category_id': 'evidence', 'order': 25},
@@ -143,14 +154,16 @@ def build_download_response(content: bytes, content_type: str, file_name: str) -
     return resp
 
 
-def resolve_report_queryset(project, user, filters: dict | None = None):
+def _resolve_submission_queryset(project, user, filters: dict | None = None, *, include_unscored: bool = False):
     filters = filters or {}
-    submissions = StudentSubmission.objects.filter(project=project).exclude(final_score__isnull=True).select_related(
+    submissions = StudentSubmission.objects.filter(project=project).select_related(
         'user',
         'user__class_obj',
         'user__class_obj__major',
         'user__department',
-    ).order_by('-final_score', 'id')
+    )
+    if not include_unscored:
+        submissions = submissions.exclude(final_score__isnull=True)
     current_level = user.current_role.level if user.current_role else -1
     if current_level == 3 and user.department_id:
         submissions = submissions.filter(user__department_id=user.department_id)
@@ -176,6 +189,10 @@ def resolve_report_queryset(project, user, filters: dict | None = None):
                 | Q(user__student_no__icontains=kw)
             )
     return submissions
+
+
+def resolve_report_queryset(project, user, filters: dict | None = None):
+    return _resolve_submission_queryset(project, user, filters=filters, include_unscored=False).order_by('-final_score', 'id')
 
 
 def _collect_leaf_indicators(project):
@@ -518,7 +535,8 @@ def _build_indicator_path_labels(indicator, id_map):
     return prefix_label, path
 
 
-def get_project_export_catalog(project, view_mode=FIELD_VIEW_MODE_TEMPLATE_COMMON):
+def get_project_export_catalog(project, view_mode=FIELD_VIEW_MODE_TEMPLATE_COMMON, user_common_keys=None):
+    user_common_set = set(str(k).strip() for k in (user_common_keys or []) if str(k).strip())
     # Pre-load ALL indicators for this project so we can walk up any depth
     all_indicators = list(
         EvalIndicator.objects.filter(project=project).order_by('order', 'id')
@@ -543,7 +561,11 @@ def get_project_export_catalog(project, view_mode=FIELD_VIEW_MODE_TEMPLATE_COMMO
         f['source'] = 'system'
         f['category_label'] = category_meta.get(f.get('category_id'), {}).get('label', '')
         f['group_order'] = category_meta.get(f.get('category_id'), {}).get('order', 999)
-        f['is_common'] = bool(f.get('is_common', f.get('key') in COMMON_BASE_KEYS))
+        system_common = bool(f.get('is_common', f.get('key') in COMMON_BASE_KEYS))
+        user_common = f.get('key') in user_common_set
+        f['is_system_common'] = system_common
+        f['is_user_common'] = user_common
+        f['is_common'] = bool(system_common or user_common)
         f['priority'] = 10 if f['is_common'] else 100
         fields.append(f)
     for ind in leaf_indicators:
@@ -600,15 +622,17 @@ def get_project_export_catalog(project, view_mode=FIELD_VIEW_MODE_TEMPLATE_COMMO
             (f'ind_{ind.id}_evidence_urls', f'{prefix_label}-佐证链接列表', 'evidence_urls'),
         ])
         for idx, (key, label, split_type) in enumerate(split_fields):
-            is_common = False
+            system_common = False
             if split_type == 'final_adopted_score':
-                is_common = True
+                system_common = True
             elif split_type == 'self_score' and ind.score_source == 'self':
-                is_common = True
+                system_common = True
             elif split_type == 'imported_score' and ind.score_source == 'import':
-                is_common = True
+                system_common = True
             elif split_type == 'process_record' and ind.score_source == 'self' and ind.require_process_record:
-                is_common = True
+                system_common = True
+            user_common = key in user_common_set
+            is_common = bool(system_common or user_common)
             fields.append({
                 'key': key,
                 'label': label,
@@ -630,6 +654,8 @@ def get_project_export_catalog(project, view_mode=FIELD_VIEW_MODE_TEMPLATE_COMMO
                 'is_record_only': bool(ind.is_record_only),
                 'record_only_requires_review': review_enabled_for_record_only,
                 'require_process_record': bool(ind.require_process_record),
+                'is_system_common': system_common,
+                'is_user_common': user_common,
                 'is_common': is_common,
                 'priority': 20 if is_common else 200,
                 'group_order': category_meta['indicators']['order'],
@@ -649,8 +675,9 @@ def get_project_export_catalog(project, view_mode=FIELD_VIEW_MODE_TEMPLATE_COMMO
         module_order = _module_order(module_key)
         indicator_index = _extract_indicator_index(indicator_key)
         base_order = module_order * 100000 + indicator_index * 100 + ind.id
+        agg_key = f'agg_{ind.id}'
         fields.append({
-            'key': f'agg_{ind.id}',
+            'key': agg_key,
             'label': f'{name_label}-汇总分',
             'source': 'children',
             'indicator_id': ind.id,
@@ -670,6 +697,8 @@ def get_project_export_catalog(project, view_mode=FIELD_VIEW_MODE_TEMPLATE_COMMO
             'is_record_only': False,
             'record_only_requires_review': False,
             'require_process_record': False,
+            'is_system_common': True,
+            'is_user_common': agg_key in user_common_set,
             'is_common': True,
             'priority': 15,
             'group_order': category_meta['indicators']['order'],
@@ -689,6 +718,7 @@ def get_project_export_catalog(project, view_mode=FIELD_VIEW_MODE_TEMPLATE_COMMO
         'all_fields': fields,
         'field_tree': _build_indicator_field_tree(fields, id_map),
         'presets': _build_default_word_presets(fields),
+        'user_common_keys': sorted(user_common_set),
     }
 
 
@@ -820,6 +850,358 @@ def _field_value(row: dict, field_key: str):
     return row.get(field_key, '')
 
 
+def _render_static_template_text(template: str, row: dict | None, scope_defaults: dict | None = None):
+    text = str(template or '')
+    row = row or {}
+    scope_defaults = scope_defaults or {}
+
+    def _replace(match):
+        key = match.group(1)
+        value = _field_value(row, key)
+        if value in (None, ''):
+            value = scope_defaults.get(key, '')
+        return '' if value is None else str(value)
+
+    return re.sub(r'\{([A-Za-z_][A-Za-z0-9_]*)\}', _replace, text)
+
+
+def _display_user_name(user):
+    if not user:
+        return ''
+    return getattr(user, 'name', '') or getattr(user, 'username', '') or ''
+
+
+def normalize_group_by(group_by: str | None) -> str:
+    value = (group_by or '').strip().lower()
+    if value not in SUPPORTED_GROUP_BY:
+        return ''
+    return '' if value in ('', 'none') else value
+
+
+def normalize_group_file_mode(group_file_mode: str | None, *, multi_file: bool = False) -> str:
+    value = str(group_file_mode or '').strip().lower()
+    if value in SUPPORTED_GROUP_FILE_MODE:
+        return value
+    return 'per_student_file' if multi_file else 'single_file'
+
+
+def _group_label_from_row(row: dict, group_by: str) -> str:
+    if group_by == 'class':
+        return str(row.get('class_name') or '').strip() or '未分班'
+    if group_by == 'major':
+        return str(row.get('major') or '').strip() or '未分专业'
+    if group_by == 'department':
+        return str(row.get('department') or '').strip() or '未分院系'
+    return '全部'
+
+
+def _group_label_from_submission(submission, group_by: str) -> str:
+    user = getattr(submission, 'user', None)
+    class_obj = getattr(user, 'class_obj', None) if user else None
+    if group_by == 'class':
+        return getattr(class_obj, 'name', '') or '未分班'
+    if group_by == 'major':
+        major = getattr(class_obj, 'major', None) if class_obj else None
+        return getattr(major, 'name', '') or '未分专业'
+    if group_by == 'department':
+        dept = getattr(user, 'department', None) if user else None
+        return getattr(dept, 'name', '') or '未分院系'
+    return '全部'
+
+
+def split_rows_by_group(rows: list[dict], group_by: str | None) -> list[tuple[str, list[dict]]]:
+    key = normalize_group_by(group_by)
+    if not key:
+        return [('全部', list(rows or []))]
+    bucket = defaultdict(list)
+    for row in rows or []:
+        bucket[_group_label_from_row(row, key)].append(row)
+    return sorted(bucket.items(), key=lambda item: item[0])
+
+
+def _compute_scope_submission_stats(project, user, filters: dict | None, rows: list[dict], group_by: str | None = ''):
+    all_scope_submissions = _resolve_submission_queryset(
+        project,
+        user,
+        filters=filters,
+        include_unscored=True,
+    )
+    total_all = all_scope_submissions.count()
+    valid_all = len(rows or [])
+    missing_all = max(total_all - valid_all, 0)
+    result = {
+        'scope_total_submission_count': total_all,
+        'scope_valid_submission_count': valid_all,
+        'scope_missing_submission_count': missing_all,
+        'scope_total_submission_count_by_group': {},
+        'scope_valid_submission_count_by_group': {},
+        'scope_missing_submission_count_by_group': {},
+    }
+    key = normalize_group_by(group_by)
+    if not key:
+        return result
+    total_by_group = defaultdict(int)
+    for sub in all_scope_submissions:
+        total_by_group[_group_label_from_submission(sub, key)] += 1
+    valid_by_group = defaultdict(int)
+    for row in rows or []:
+        valid_by_group[_group_label_from_row(row, key)] += 1
+    missing_by_group = {}
+    for group_name in set(total_by_group.keys()) | set(valid_by_group.keys()):
+        missing_by_group[group_name] = max(total_by_group.get(group_name, 0) - valid_by_group.get(group_name, 0), 0)
+    result['scope_total_submission_count_by_group'] = dict(total_by_group)
+    result['scope_valid_submission_count_by_group'] = dict(valid_by_group)
+    result['scope_missing_submission_count_by_group'] = dict(missing_by_group)
+    return result
+
+
+def _normalize_reviewer_signature_policy(raw_policy: dict | None):
+    policy = dict(raw_policy or {})
+    source = str(policy.get('source') or 'actual_scored').strip().lower()
+    if source not in {'actual_scored', 'assigned'}:
+        source = 'actual_scored'
+    include_arbitration = bool(policy.get('include_arbitration', False))
+    role_types = policy.get('role_types') or ['counselor', 'counselor_confirm', 'counselor_dispatch', 'assistant']
+    if not isinstance(role_types, list):
+        role_types = ['counselor', 'counselor_confirm', 'counselor_dispatch', 'assistant']
+    role_types = [str(item).strip() for item in role_types if str(item).strip()]
+    assignment_statuses = policy.get('assignment_statuses') or ['assigned', 'released', 'completed']
+    if not isinstance(assignment_statuses, list):
+        assignment_statuses = ['assigned', 'released', 'completed']
+    assignment_statuses = [str(item).strip() for item in assignment_statuses if str(item).strip()]
+    return {
+        'source': source,
+        'include_arbitration': include_arbitration,
+        'role_types': role_types,
+        'assignment_statuses': assignment_statuses,
+    }
+
+
+def _collect_reviewer_signature_values(project, rows: list[dict], group_by: str | None = '', signature_policy: dict | None = None):
+    signature_policy = _normalize_reviewer_signature_policy(signature_policy)
+    submission_ids = [row.get('submission_id') for row in rows or [] if row.get('submission_id')]
+    if not submission_ids:
+        empty = {
+            'reviewer_signatures_all': '',
+            'reviewer_signatures_teachers': '',
+            'reviewer_signatures_assistants': '',
+        }
+        return {**empty, 'by_group': {}, 'group_by': normalize_group_by(group_by)}
+    assignment_qs = (
+        ReviewAssignment.objects
+        .filter(
+            project=project,
+            submission_id__in=submission_ids,
+            status__in=signature_policy['assignment_statuses'],
+            role_type__in=signature_policy['role_types'],
+        )
+        .select_related('reviewer', 'submission__user', 'submission__user__class_obj', 'submission__user__class_obj__major', 'submission__user__department')
+    )
+    all_names = set()
+    teacher_names = set()
+    assistant_names = set()
+    key = normalize_group_by(group_by)
+    by_group = defaultdict(lambda: {'all': set(), 'teachers': set(), 'assistants': set()})
+    role_lookup = {}
+    for item in assignment_qs:
+        role_lookup[(item.submission_id, item.reviewer_id)] = item.role_type
+
+    def _put_name(group_name: str, name: str, role_type: str):
+        if not name:
+            return
+        all_names.add(name)
+        if role_type == 'assistant':
+            assistant_names.add(name)
+        else:
+            teacher_names.add(name)
+        if key:
+            by_group[group_name]['all'].add(name)
+            if role_type == 'assistant':
+                by_group[group_name]['assistants'].add(name)
+            else:
+                by_group[group_name]['teachers'].add(name)
+
+    if signature_policy['source'] == 'assigned':
+        for item in assignment_qs:
+            group_name = _group_label_from_submission(item.submission, key) if key else '全部'
+            _put_name(group_name, _display_user_name(item.reviewer), item.role_type)
+    else:
+        score_qs = (
+            ScoreRecord.objects
+            .filter(
+                submission_id__in=submission_ids,
+                reviewer_id__isnull=False,
+                score_channel='assignment',
+            )
+            .exclude(round_type=3)
+            .select_related('reviewer', 'submission__user', 'submission__user__class_obj', 'submission__user__class_obj__major', 'submission__user__department')
+            .order_by('id')
+        )
+        seen_score_reviewer = set()
+        for rec in score_qs:
+            marker = (rec.submission_id, rec.reviewer_id)
+            if marker in seen_score_reviewer:
+                continue
+            seen_score_reviewer.add(marker)
+            role_type = role_lookup.get(marker) or ('assistant' if rec.scorer_role_level == 1 else 'counselor')
+            group_name = _group_label_from_submission(rec.submission, key) if key else '全部'
+            _put_name(group_name, _display_user_name(rec.reviewer), role_type)
+        if signature_policy.get('include_arbitration'):
+            arbitration_qs = (
+                ArbitrationRecord.objects
+                .filter(
+                    submission_id__in=submission_ids,
+                    arbitrator_id__isnull=False,
+                )
+                .select_related('arbitrator', 'submission__user', 'submission__user__class_obj', 'submission__user__class_obj__major', 'submission__user__department')
+                .order_by('id')
+            )
+            seen_arbitrator = set()
+            for rec in arbitration_qs:
+                marker = (rec.submission_id, rec.arbitrator_id)
+                if marker in seen_arbitrator:
+                    continue
+                seen_arbitrator.add(marker)
+                group_name = _group_label_from_submission(rec.submission, key) if key else '全部'
+                _put_name(group_name, _display_user_name(rec.arbitrator), 'counselor')
+
+    def _join(values):
+        return '、'.join(sorted(values))
+
+    normalized_by_group = {}
+    for group_name, payload in by_group.items():
+        normalized_by_group[group_name] = {
+            'reviewer_signatures_all': _join(payload['all']),
+            'reviewer_signatures_teachers': _join(payload['teachers']),
+            'reviewer_signatures_assistants': _join(payload['assistants']),
+        }
+    return {
+        'reviewer_signatures_all': _join(all_names),
+        'reviewer_signatures_teachers': _join(teacher_names),
+        'reviewer_signatures_assistants': _join(assistant_names),
+        'by_group': normalized_by_group,
+        'group_by': key,
+    }
+
+
+def _field_numeric_values(rows: list[dict], field_key: str):
+    values = []
+    for row in rows or []:
+        raw = row.get(field_key)
+        if raw is None or raw == '':
+            continue
+        try:
+            values.append(float(raw))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _evaluate_computed_fields(rows: list[dict], computed_fields: list[dict], scope_values: dict):
+    computed = {}
+    for item in computed_fields or []:
+        key = str(item.get('key') or '').strip()
+        fn = str(item.get('fn') or '').strip().lower()
+        if not key or not fn:
+            continue
+        target = str(item.get('target') or 'valid_rows').strip().lower()
+        field_key = str(item.get('field_key') or '').strip()
+        sep = str(item.get('sep') or '、')
+        precision = item.get('precision')
+        value = ''
+
+        if fn == 'count':
+            if target in ('missing_rows', 'missing_submissions'):
+                value = int(scope_values.get('scope_missing_submission_count', 0))
+            elif target == 'reviewers':
+                names = str(scope_values.get('reviewer_signatures_all') or '')
+                value = len([x for x in names.split('、') if x]) if names else 0
+            else:
+                value = len(rows or [])
+        elif fn in ('sum', 'avg', 'min', 'max'):
+            values = _field_numeric_values(rows, field_key)
+            if not values:
+                value = 0
+            elif fn == 'sum':
+                value = sum(values)
+            elif fn == 'avg':
+                value = sum(values) / len(values)
+            elif fn == 'min':
+                value = min(values)
+            else:
+                value = max(values)
+            if precision is not None:
+                try:
+                    value = round(float(value), int(precision))
+                except (TypeError, ValueError):
+                    pass
+        elif fn == 'join_distinct':
+            if target == 'reviewers':
+                role = str(item.get('role') or 'all').strip().lower()
+                if role in ('teacher', 'teachers', 'counselor'):
+                    value = scope_values.get('reviewer_signatures_teachers', '')
+                elif role in ('assistant', 'assistants'):
+                    value = scope_values.get('reviewer_signatures_assistants', '')
+                else:
+                    value = scope_values.get('reviewer_signatures_all', '')
+            else:
+                uniq = []
+                seen = set()
+                for row in rows or []:
+                    raw = str(row.get(field_key) or '').strip()
+                    if not raw or raw in seen:
+                        continue
+                    seen.add(raw)
+                    uniq.append(raw)
+                value = sep.join(uniq)
+        else:
+            continue
+        computed[key] = value
+    return computed
+
+
+def enrich_export_rows(project, user, rows: list[dict], filters: dict | None = None, mapping_config: dict | None = None, group_by: str | None = ''):
+    rows = list(rows or [])
+    scope_stats = _compute_scope_submission_stats(project, user, filters=filters, rows=rows, group_by=group_by)
+    signature_values = _collect_reviewer_signature_values(
+        project,
+        rows,
+        group_by=group_by,
+        signature_policy=(mapping_config or {}).get('reviewer_signature_policy'),
+    )
+    scope_values = {
+        'scope_total_submission_count': scope_stats['scope_total_submission_count'],
+        'scope_valid_submission_count': scope_stats['scope_valid_submission_count'],
+        'scope_missing_submission_count': scope_stats['scope_missing_submission_count'],
+        'reviewer_signatures_all': signature_values['reviewer_signatures_all'],
+        'reviewer_signatures_teachers': signature_values['reviewer_signatures_teachers'],
+        'reviewer_signatures_assistants': signature_values['reviewer_signatures_assistants'],
+    }
+    computed_fields = (mapping_config or {}).get('computed_fields') or []
+    computed_values = _evaluate_computed_fields(rows, computed_fields, scope_values)
+    scope_values.update(computed_values)
+
+    key = signature_values.get('group_by') or normalize_group_by(group_by)
+    signature_by_group = signature_values.get('by_group') or {}
+    total_by_group = scope_stats.get('scope_total_submission_count_by_group') or {}
+    valid_by_group = scope_stats.get('scope_valid_submission_count_by_group') or {}
+    missing_by_group = scope_stats.get('scope_missing_submission_count_by_group') or {}
+
+    for row in rows:
+        row.update(scope_values)
+        if key:
+            group_name = _group_label_from_row(row, key)
+            row['scope_total_submission_count'] = total_by_group.get(group_name, row.get('scope_total_submission_count', 0))
+            row['scope_valid_submission_count'] = valid_by_group.get(group_name, row.get('scope_valid_submission_count', 0))
+            row['scope_missing_submission_count'] = missing_by_group.get(group_name, row.get('scope_missing_submission_count', 0))
+            sig = signature_by_group.get(group_name, {})
+            if sig:
+                row['reviewer_signatures_all'] = sig.get('reviewer_signatures_all', row.get('reviewer_signatures_all', ''))
+                row['reviewer_signatures_teachers'] = sig.get('reviewer_signatures_teachers', row.get('reviewer_signatures_teachers', ''))
+                row['reviewer_signatures_assistants'] = sig.get('reviewer_signatures_assistants', row.get('reviewer_signatures_assistants', ''))
+    return rows, scope_values
+
+
 def validate_export_mapping_config(mapping_config: dict | None, output_format: str) -> dict:
     """
     规范并校验导出映射配置。
@@ -910,6 +1292,51 @@ def validate_export_mapping_config(mapping_config: dict | None, output_format: s
     else:
         cfg['write_header'] = bool(raw_write_header)
 
+    # computed_fields: 声明式聚合字段（供 static_cells 与模板字段引用）
+    normalized_computed = []
+    raw_computed = cfg.get('computed_fields') or []
+    if not isinstance(raw_computed, list):
+        raise ValueError('computed_fields 配置格式错误，应为数组')
+    seen_computed_keys = set()
+    allowed_fns = {'count', 'sum', 'avg', 'min', 'max', 'join_distinct'}
+    for idx, item in enumerate(raw_computed, 1):
+        if not isinstance(item, dict):
+            raise ValueError(f'第 {idx} 个 computed_fields 配置格式错误')
+        key = str(item.get('key') or '').strip()
+        fn = str(item.get('fn') or '').strip().lower()
+        if not key and not fn:
+            continue
+        if not key:
+            raise ValueError(f'第 {idx} 个 computed_fields 未填写 key')
+        if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', key):
+            raise ValueError(f'computed_fields key 不合法：{key}')
+        if key in seen_computed_keys:
+            raise ValueError(f'computed_fields key 重复：{key}')
+        if fn not in allowed_fns:
+            raise ValueError(f'computed_fields fn 不支持：{fn}')
+        target = str(item.get('target') or 'valid_rows').strip().lower() or 'valid_rows'
+        field_key = str(item.get('field_key') or '').strip()
+        if fn in {'sum', 'avg', 'min', 'max'} and not field_key:
+            raise ValueError(f'computed_fields[{key}] 需要 field_key')
+        normalized_item = {
+            'key': key,
+            'fn': fn,
+            'target': target,
+            'field_key': field_key,
+            'sep': str(item.get('sep') or '、'),
+        }
+        if item.get('precision') is not None:
+            try:
+                normalized_item['precision'] = int(item.get('precision'))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f'computed_fields[{key}] precision 必须为整数') from exc
+        role = str(item.get('role') or '').strip().lower()
+        if role:
+            normalized_item['role'] = role
+        seen_computed_keys.add(key)
+        normalized_computed.append(normalized_item)
+    cfg['computed_fields'] = normalized_computed
+
     # static_cells: 向固定单元格写入一次的共享元数据（如专业、年级、参评人数）
     normalized_static = []
     raw_static = cfg.get('static_cells') or []
@@ -930,11 +1357,30 @@ def validate_export_mapping_config(mapping_config: dict | None, output_format: s
             raise ValueError(f'静态单元格地址不合法：{cell}')
         if cell in seen_cells:
             raise ValueError(f'静态单元格地址重复：{cell}')
-        if aggregation not in ('first', 'count'):
+        if aggregation not in (
+            'first',
+            'count',
+            'first_non_empty',
+            'count_valid_submissions',
+            'count_missing_submissions',
+            'computed',
+            'template',
+        ):
             aggregation = 'first'
+        if aggregation == 'computed' and not field_key:
+            raise ValueError(f'第 {idx} 个静态单元格使用 computed 时必须填写 field_key')
+        template = str(item.get('template') or '')
+        if aggregation == 'template' and not template.strip():
+            raise ValueError(f'第 {idx} 个静态单元格使用 template 时必须填写模板内容')
         seen_cells.add(cell)
-        normalized_static.append({'cell': cell, 'field_key': field_key, 'aggregation': aggregation})
+        normalized_static.append({
+            'cell': cell,
+            'field_key': field_key,
+            'aggregation': aggregation,
+            'template': template,
+        })
     cfg['static_cells'] = normalized_static
+    cfg['reviewer_signature_policy'] = _normalize_reviewer_signature_policy(cfg.get('reviewer_signature_policy'))
 
     return cfg
 
@@ -963,19 +1409,40 @@ def render_excel(rows, mapping_config: dict | None = None, template_path: str | 
     header_row = int(mapping_config.get('header_row', 1))
     data_start_row = int(mapping_config.get('data_start_row', header_row + 1))
     write_header = mapping_config.get('write_header', True)
+    # Prevent header overwrite when data start row is configured too early.
+    if write_header and data_start_row <= header_row:
+        data_start_row = header_row + 1
     if write_header:
         for col in columns:
             ws[f"{col['column']}{header_row}"] = col.get('header') or col.get('field_key')
     # 写入静态单元格（共享元数据，只写一次）
     static_cells = mapping_config.get('static_cells') or []
-    if static_cells and rows:
+    if static_cells:
+        scope_defaults = {
+            'scope_valid_submission_count': len(rows),
+            'scope_missing_submission_count': 0,
+            'scope_total_submission_count': len(rows),
+        }
         for sc in static_cells:
             agg = sc.get('aggregation', 'first')
             fk = sc.get('field_key', '')
-            if agg == 'count' or fk == '_count':
+            if agg in ('count', 'count_valid_submissions') or fk in ('_count', 'scope_valid_submission_count'):
                 value = len(rows)
-            else:
+            elif agg == 'count_missing_submissions' or fk == 'scope_missing_submission_count':
+                value = _field_value(rows[0], 'scope_missing_submission_count') if rows else 0
+            elif agg == 'first_non_empty':
+                value = ''
+                for row in rows:
+                    candidate = _field_value(row, fk)
+                    if str(candidate or '').strip():
+                        value = candidate
+                        break
+            elif agg == 'computed':
                 value = _field_value(rows[0], fk) if rows else ''
+            elif agg == 'template':
+                value = _render_static_template_text(sc.get('template', ''), rows[0] if rows else {}, scope_defaults)
+            else:
+                value = _field_value(rows[0], fk) if rows else scope_defaults.get(fk, '')
             ws[sc['cell']] = value
     for i, row in enumerate(rows):
         row_no = data_start_row + i
@@ -1207,21 +1674,81 @@ def render_word(rows, mapping_config: dict | None = None, template_path: str | N
 
 
 def _convert_docx_to_pdf_bytes(docx_bytes: bytes) -> bytes | None:
+    # Strategy 1: docx2pdf (depends on Microsoft Word on Windows/macOS)
     try:
         from docx2pdf import convert
     except ImportError:
-        return None
+        convert = None
     with tempfile.TemporaryDirectory() as tmpdir:
         input_path = Path(tmpdir) / 'input.docx'
         output_path = Path(tmpdir) / 'output.pdf'
         input_path.write_bytes(docx_bytes)
+        if convert:
+            try:
+                convert(str(input_path), str(output_path))
+            except Exception:
+                pass
+            else:
+                if output_path.exists():
+                    return output_path.read_bytes()
+        # Strategy 2: LibreOffice headless convert
+        soffice = _resolve_soffice_binary()
+        if not soffice:
+            return None
         try:
-            convert(str(input_path), str(output_path))
+            subprocess.run(
+                [
+                    soffice,
+                    '--headless',
+                    '--convert-to',
+                    'pdf',
+                    '--outdir',
+                    str(Path(tmpdir)),
+                    str(input_path),
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
         except Exception:
             return None
         if not output_path.exists():
+            # Some builds may output with original filename stem
+            alt_output = Path(tmpdir) / f'{input_path.stem}.pdf'
+            if alt_output.exists():
+                return alt_output.read_bytes()
             return None
         return output_path.read_bytes()
+
+
+def _resolve_soffice_binary() -> str | None:
+    """
+    Resolve LibreOffice executable path across Linux/Windows environments.
+    Priority:
+    1) LIBREOFFICE_BIN env
+    2) PATH lookup
+    3) Common Windows installation paths
+    """
+    env_bin = os.environ.get('LIBREOFFICE_BIN', '').strip()
+    if env_bin:
+        expanded = os.path.expandvars(env_bin)
+        if os.path.exists(expanded):
+            return expanded
+
+    for candidate in ('soffice', 'soffice.exe', 'libreoffice'):
+        hit = shutil.which(candidate)
+        if hit:
+            return hit
+
+    if os.name == 'nt':
+        common = [
+            r'C:\Program Files\LibreOffice\program\soffice.exe',
+            r'C:\Program Files (x86)\LibreOffice\program\soffice.exe',
+        ]
+        for path in common:
+            if os.path.exists(path):
+                return path
+    return None
 
 
 def _render_pdf_fallback(rows, mapping_config: dict | None = None) -> bytes:
@@ -1257,6 +1784,8 @@ def _render_pdf_fallback(rows, mapping_config: dict | None = None) -> bytes:
 
 
 def render_pdf(rows, mapping_config: dict | None = None, template_path: str | None = None) -> bytes:
+    # Prefer template-based rendering. If conversion runtime is unavailable,
+    # keep behavior explicit so users can switch to Word export and preserve layout.
     if template_path:
         word_bytes = render_word(rows, mapping_config=mapping_config, template_path=template_path)
         pdf_bytes = _convert_docx_to_pdf_bytes(word_bytes)
@@ -1266,7 +1795,8 @@ def render_pdf(rows, mapping_config: dict | None = None, template_path: str | No
             'PDF 转换失败：服务器未安装 Microsoft Word 或 LibreOffice，'
             '请改为导出 Word 格式后在本地另存为 PDF。'
         )
-    raise RuntimeError('PDF 导出需要上传并绑定 Word 模板，请在"导出模板配置"中选择模板并保存映射后再试。')
+    # No template: directly use tabular fallback
+    return _render_pdf_fallback(rows, mapping_config=mapping_config)
 
 
 _FILENAME_SAFE_RE = re.compile(r'[\\/:*?"<>|\r\n\t]')
@@ -1306,6 +1836,19 @@ def _format_zip_filename(pattern: str, row: dict, ext: str, seen: dict) -> str:
     return file_name
 
 
+def _group_dir_name_from_row(row: dict, group_by: str | None) -> str | None:
+    key = normalize_group_by(group_by)
+    if not key:
+        return None
+    if key == 'class':
+        raw = row.get('class_name') or '未知班级'
+    elif key == 'major':
+        raw = row.get('major') or '未知专业'
+    else:
+        raw = row.get('department') or '未知院系'
+    return _FILENAME_SAFE_RE.sub('_', str(raw)).strip() or '未分组'
+
+
 def render_word_zip(rows, mapping_config: dict | None = None, template_path: str | None = None,
                     group_by: str | None = None, zip_filename_pattern: str | None = None) -> bytes:
     """每人单独渲染为一个 Word 文件，打包为 ZIP 返回。
@@ -1336,8 +1879,8 @@ def render_word_zip(rows, mapping_config: dict | None = None, template_path: str
             for row in rows:
                 docx_bytes = _render_single_word(row, mapping_config, template_to_use)
                 file_name = _format_zip_filename(pattern, row, 'docx', seen_names)
-                if group == 'class':
-                    dir_name = _FILENAME_SAFE_RE.sub('_', row.get('class_name') or '未知班级').strip() or '未知班级'
+                dir_name = _group_dir_name_from_row(row, group)
+                if dir_name:
                     zf.writestr(f'{dir_name}/{file_name}', docx_bytes)
                 else:
                     zf.writestr(file_name, docx_bytes)
@@ -1357,8 +1900,7 @@ def render_pdf_zip(rows, mapping_config: dict | None = None, template_path: str 
     import io
     import zipfile
 
-    if not template_path:
-        raise RuntimeError('PDF 导出需要上传并绑定 Word 模板')
+    # ZIP 分包场景优先使用模板逐人渲染；无模板时降级为逐人表格 PDF。
     if not rows:
         raise RuntimeError('没有可导出的学生数据')
     mapping_config = mapping_config or {}
@@ -1374,16 +1916,22 @@ def render_pdf_zip(rows, mapping_config: dict | None = None, template_path: str 
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
             seen_names: dict = {}
             for row in rows:
-                docx_bytes = _render_single_word(row, mapping_config, template_to_use)
-                pdf_bytes = _convert_docx_to_pdf_bytes(docx_bytes)
+                if template_to_use:
+                    docx_bytes = _render_single_word(row, mapping_config, template_to_use)
+                    pdf_bytes = _convert_docx_to_pdf_bytes(docx_bytes)
+                else:
+                    pdf_bytes = None
                 if not pdf_bytes:
-                    raise RuntimeError(
-                        'PDF 转换失败：服务器未安装 Microsoft Word 或 LibreOffice，'
-                        '请改为导出 Word 格式后在本地另存为 PDF。'
-                    )
+                    if template_to_use:
+                        raise RuntimeError(
+                            'PDF 转换失败：服务器未安装 Microsoft Word 或 LibreOffice，'
+                            '请改为导出 Word 格式后在本地另存为 PDF。'
+                        )
+                    # No template bound: keep per-student ZIP contract with single-row fallback table.
+                    pdf_bytes = _render_pdf_fallback([row], mapping_config=mapping_config)
                 file_name = _format_zip_filename(pattern, row, 'pdf', seen_names)
-                if group == 'class':
-                    dir_name = _FILENAME_SAFE_RE.sub('_', row.get('class_name') or '未知班级').strip() or '未知班级'
+                dir_name = _group_dir_name_from_row(row, group)
+                if dir_name:
                     zf.writestr(f'{dir_name}/{file_name}', pdf_bytes)
                 else:
                     zf.writestr(file_name, pdf_bytes)
@@ -1393,8 +1941,63 @@ def render_pdf_zip(rows, mapping_config: dict | None = None, template_path: str 
             os.unlink(cleanup_path)
 
 
-def build_export_payload(project, user, filters=None):
+def render_excel_zip_by_group(rows, mapping_config: dict | None = None, template_path: str | None = None,
+                              group_by: str | None = None) -> bytes:
+    import zipfile
+    grouped = split_rows_by_group(rows, group_by)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        seen: dict = {}
+        for group_name, group_rows in grouped:
+            payload = render_excel(group_rows, mapping_config=mapping_config, template_path=template_path)
+            safe_group = _FILENAME_SAFE_RE.sub('_', group_name).strip('_') or '未分组'
+            file_name = _format_zip_filename(f'{safe_group}', {'real_name': safe_group}, 'xlsx', seen)
+            zf.writestr(file_name, payload)
+    return buf.getvalue()
+
+
+def render_word_zip_by_group(rows, mapping_config: dict | None = None, template_path: str | None = None,
+                             group_by: str | None = None) -> bytes:
+    if not template_path:
+        raise RuntimeError('Word 导出需要上传 Word 模板')
+    import zipfile
+    grouped = split_rows_by_group(rows, group_by)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        seen: dict = {}
+        for group_name, group_rows in grouped:
+            payload = render_word(group_rows, mapping_config=mapping_config, template_path=template_path)
+            safe_group = _FILENAME_SAFE_RE.sub('_', group_name).strip('_') or '未分组'
+            file_name = _format_zip_filename(f'{safe_group}', {'real_name': safe_group}, 'docx', seen)
+            zf.writestr(file_name, payload)
+    return buf.getvalue()
+
+
+def render_pdf_zip_by_group(rows, mapping_config: dict | None = None, template_path: str | None = None,
+                            group_by: str | None = None) -> bytes:
+    import zipfile
+    grouped = split_rows_by_group(rows, group_by)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        seen: dict = {}
+        for group_name, group_rows in grouped:
+            payload = render_pdf(group_rows, mapping_config=mapping_config, template_path=template_path)
+            safe_group = _FILENAME_SAFE_RE.sub('_', group_name).strip('_') or '未分组'
+            file_name = _format_zip_filename(f'{safe_group}', {'real_name': safe_group}, 'pdf', seen)
+            zf.writestr(file_name, payload)
+    return buf.getvalue()
+
+
+def build_export_payload(project, user, filters=None, mapping_config: dict | None = None, group_by: str | None = ''):
     submissions = resolve_report_queryset(project, user, filters=filters)
     rows = build_export_rows(project, submissions)
+    rows, _scope_values = enrich_export_rows(
+        project,
+        user,
+        rows,
+        filters=filters,
+        mapping_config=mapping_config,
+        group_by=group_by,
+    )
     return rows
 

@@ -217,6 +217,25 @@ export function getProjectConfigTemplates() {
 }
 
 /**
+ * 更新模板元信息（名称/可见范围）
+ * @param {number} templateId
+ * @param {Object} body - { name?, visibility? }
+ * @returns {Promise<Object>}
+ */
+export function updateProjectConfigTemplate(templateId, body) {
+  return api.patch(`/project-config-templates/${templateId}/`, body).then((res) => res.data)
+}
+
+/**
+ * 删除模板
+ * @param {number} templateId
+ * @returns {Promise<Object>}
+ */
+export function deleteProjectConfigTemplate(templateId) {
+  return api.delete(`/project-config-templates/${templateId}/`).then((res) => res.data)
+}
+
+/**
  * 将当前项目配置保存为模板
  * @param {number} projectId
  * @param {Object} body - { name, visibility?, sections? }
@@ -238,11 +257,75 @@ export function applyProjectConfigTemplate(projectId, templateId, body) {
 }
 
 /**
+ * 导出已保存的模板为 JSON 文件（返回 Blob）
+ * @param {number} templateId
+ * @returns {Promise<{blob: Blob, filename: string}>}
+ */
+export function exportProjectConfigTemplate(templateId) {
+  return api
+    .get(`/project-config-templates/${templateId}/export/`, { responseType: 'blob' })
+    .then((res) => {
+      const disposition = res.headers['content-disposition'] || ''
+      const match = disposition.match(/filename\*?=(?:UTF-8'')?([^;]+)/i)
+      const filename = match ? decodeURIComponent(match[1].replace(/"/g, '')) : `template_${templateId}.json`
+      return { blob: res.data, filename }
+    })
+}
+
+/**
+ * 从 JSON 文件导入模板到模板库
+ * @param {FormData} formData - 包含 file 字段（JSON 文件），可选 name 和 visibility 字段
+ * @returns {Promise<Object>}
+ */
+export function importProjectConfigTemplate(formData) {
+  return api
+    .post('/project-config-templates/import/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    .then((res) => res.data)
+}
+
+/**
+ * 将当前项目配置直接导出为 JSON 文件，不入库（返回 Blob）
+ * @param {number} projectId
+ * @param {Object} body - { sections: string[], name?: string }
+ * @returns {Promise<{blob: Blob, filename: string}>}
+ */
+export function exportCurrentProjectConfig(projectId, body) {
+  return api
+    .post(`/projects/${projectId}/config-templates/export/`, body, { responseType: 'blob' })
+    .then((res) => {
+      const disposition = res.headers['content-disposition'] || ''
+      const match = disposition.match(/filename\*?=(?:UTF-8'')?([^;]+)/i)
+      const filename = match ? decodeURIComponent(match[1].replace(/"/g, '')) : `project_${projectId}_config.json`
+      return { blob: res.data, filename }
+    })
+}
+
+/**
  * 获取项目统一导入配置。
  * @param {number} projectId
  * @returns {Promise<{project_id:number,project_name:string,import_config:Object,module_categories:string[]}>}
  */
 export function getProjectImportConfig(projectId) {
   return api.get(`/projects/${projectId}/import-config/`).then((res) => res.data)
+}
+
+/**
+ * 更新项目统一导入配置。
+ * @param {number} projectId
+ * @param {Object} importConfig
+ * @returns {Promise<{detail:string, import_config:Object}>}
+ */
+export function updateProjectImportConfig(projectId, importConfig) {
+  return api.patch(`/projects/${projectId}/import-config/`, { import_config: importConfig }).then((res) => res.data)
+}
+
+export function getReportVisibilityConfig(projectId) {
+  return api.get(`/projects/${projectId}/report-visibility/`).then((res) => res.data)
+}
+
+export function updateReportVisibilityConfig(projectId, config) {
+  return api.patch(`/projects/${projectId}/report-visibility/`, { report_visibility_config: config }).then((res) => res.data)
 }
 

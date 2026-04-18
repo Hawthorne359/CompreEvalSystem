@@ -3,7 +3,14 @@
 """
 import json
 from rest_framework import serializers
-from .models import OperationLog, AuditAttachment, LateSubmitRequest, LateSubmitRequestAttachment, LateSubmitChannel
+from .models import (
+    OperationLog,
+    AuditAttachment,
+    LateSubmitRequest,
+    LateSubmitRequestAttachment,
+    LateSubmitChannel,
+    ImportPermissionRequest,
+)
 from submission.models import StudentSubmission
 
 # 操作码 → 中文名称映射（按模块分组）
@@ -75,13 +82,24 @@ ACTION_LABELS = {
     'review_assignment_generate': '生成评审任务',
     'review_assignment_release': '辅导员放行评审任务',
     'scores_import':  '批量导入成绩',
+    'import_blocked_by_policy': '统一导入策略拦截',
     'score_override': '管理员改分',
+    'import_policy_update': '修改导入策略',
+    'import_permission_request_create': '发起导入权限申请',
+    'import_permission_request_approve': '批准导入权限申请',
+    'import_permission_request_reject': '拒绝导入权限申请',
     # appeal
     'appeal_file':   '发起申诉',
+    'appeal_independent_create': '发起独立申诉',
     'appeal_withdraw': '撤回申诉',
     'appeal_handle': '处理申诉',
+    'appeal_escalate': '上报申诉至院系主任',
+    'appeal_escalate_admin': '上报申诉至超级管理员',
+    'appeal_escalate_handle': '院系主任处理上报申诉',
+    'appeal_admin_handle': '超级管理员终裁申诉',
     # report
     'report_export': '导出报表',
+    'report_visibility_update': '修改学生报表可见策略',
     # system
     'backdoor_open':       '开启补交通道（旧版全局）',
     'backdoor_close':      '关闭补交通道（旧版全局）',
@@ -348,3 +366,37 @@ class LatePendingSubmissionSerializer(serializers.ModelSerializer):
             'season_name', 'project_name',
             'submitted_at', 'status',
         ]
+
+
+class ImportPermissionRequestSerializer(serializers.ModelSerializer):
+    """导入权限申请序列化器。"""
+    requester_name = serializers.CharField(source='requester.username', read_only=True)
+    requester_role = serializers.CharField(source='requester.current_role.name', read_only=True, allow_null=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    handler_name = serializers.CharField(source='handler.username', read_only=True, allow_null=True)
+    status_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ImportPermissionRequest
+        fields = [
+            'id',
+            'project',
+            'project_name',
+            'requester',
+            'requester_name',
+            'requester_role',
+            'requester_level',
+            'target_scope',
+            'reason',
+            'status',
+            'status_label',
+            'handler',
+            'handler_name',
+            'handle_comment',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['status', 'handler', 'handle_comment', 'created_at', 'updated_at']
+
+    def get_status_label(self, obj):
+        return obj.get_status_display()

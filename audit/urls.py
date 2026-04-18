@@ -20,6 +20,9 @@ urlpatterns = [
     # 补交通道管理（管理员端）
     path('admin/late-requests/', views.LateRequestListView.as_view(), name='admin-late-requests'),
     path('admin/late-requests/<int:pk>/handle/', views.LateRequestHandleView.as_view(), name='admin-late-request-handle'),
+    path('projects/<int:project_id>/import-requests/', views.ImportPermissionRequestCreateView.as_view(), name='import-request-create'),
+    path('admin/import-requests/', views.ImportPermissionRequestListView.as_view(), name='admin-import-requests'),
+    path('admin/import-requests/<int:pk>/handle/', views.ImportPermissionRequestHandleView.as_view(), name='admin-import-request-handle'),
     path('admin/late-channels/', views.LateChannelListCreateView.as_view(), name='admin-late-channels'),
     path('admin/late-channels/<int:pk>/close/', views.LateChannelCloseView.as_view(), name='admin-late-channel-close'),
     path('admin/late-submissions/pending/', views.LatePendingSubmissionListView.as_view(), name='admin-late-pending-submissions'),

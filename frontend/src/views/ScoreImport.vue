@@ -80,6 +80,19 @@
         <p class="text-xs text-slate-600">
           以下为本项目中标记为"统一导入"的指标，下载模板后按列填写对应指标分数即可。
         </p>
+        <div class="rounded border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 space-y-1">
+          <p>当前策略：<span class="font-medium">{{ policyModeLabel }}</span></p>
+          <p>当前账号可导范围：<span class="font-medium">{{ importScopeLabel }}</span></p>
+          <p v-if="policyBlocked" class="text-amber-700">
+            已启用上级统一导入，当前账号需申请后才能执行导入。
+          </p>
+          <p v-if="importPermissionStatus === 'pending'" class="text-blue-700">
+            已提交申请，等待直系上级审批。
+          </p>
+          <p v-if="importPermissionStatus === 'approved'" class="text-emerald-700">
+            当前项目导入申请已获批，可执行导入。
+          </p>
+        </div>
 
         <!-- 可统一导入指标树（支持任意深度嵌套） -->
         <div v-if="importableIndicators.length" class="space-y-2">
@@ -118,6 +131,18 @@
         <p v-else-if="!configLoading" class="text-xs text-slate-500">
           该项目暂无标记为"统一导入"的指标，无法使用批量导入功能。
         </p>
+        <div class="flex items-center gap-2">
+          <button
+            v-if="policyBlocked && importPermissionStatus !== 'pending'"
+            type="button"
+            class="rounded border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+            :disabled="requestingPermission"
+            @click="requestImportPermission"
+          >
+            {{ requestingPermission ? '提交中…' : '发起导入权限申请' }}
+          </button>
+          <p v-if="requestError" class="text-xs text-red-600">{{ requestError }}</p>
+        </div>
         <p v-if="configError" class="text-xs text-red-600">{{ configError }}</p>
       </div>
 
@@ -139,7 +164,7 @@
         <button
           type="button"
           class="app-btn app-btn-primary disabled:opacity-50"
-          :disabled="!selectedProject || !selectedFile || precheckLoading || uploading"
+          :disabled="!selectedProject || !selectedFile || precheckLoading || uploading || policyBlocked"
           @click="doPrecheck"
         >
           {{ precheckLoading ? '检查中…' : '预检' }}
@@ -147,7 +172,7 @@
         <button
           type="button"
           class="rounded bg-emerald-600 px-4 py-2 text-sm text-white hover:bg-emerald-700 disabled:opacity-50"
-          :disabled="uploading || precheckLoading || !previewToken || precheckHasBlockingErrors"
+          :disabled="uploading || precheckLoading || !previewToken || precheckHasBlockingErrors || policyBlocked"
           :title="!previewToken ? '请先完成预检' : precheckHasBlockingErrors ? '存在阻断性错误，请排除问题行后重新预检' : ''"
           @click="doCommit"
         >
@@ -156,7 +181,7 @@
         <button
           type="button"
           class="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-          :disabled="!selectedProject || templateDownloading"
+          :disabled="!selectedProject || templateDownloading || policyBlocked"
           @click="doDownloadTemplate"
         >
           {{ templateDownloading ? '生成中…' : '下载导入模板' }}
@@ -178,6 +203,60 @@
         <p v-if="precheckError" class="text-xs text-red-600">{{ precheckError }}</p>
         <p v-if="uploadError" class="text-xs text-red-600">{{ uploadError }}</p>
         <p v-if="templateError" class="text-xs text-red-600">{{ templateError }}</p>
+      </div>
+    </div>
+
+    <div v-if="canApproveRequests && selectedProject" class="rounded border border-slate-200 bg-white p-4 space-y-3">
+      <div class="flex items-center justify-between">
+        <h4 class="text-sm font-medium text-slate-800">导入权限申请待办</h4>
+        <button
+          type="button"
+          class="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+          :disabled="requestsLoading"
+          @click="loadImportRequests"
+        >
+          {{ requestsLoading ? '刷新中…' : '刷新' }}
+        </button>
+      </div>
+      <p v-if="requestsError" class="text-xs text-red-600">{{ requestsError }}</p>
+      <p v-if="!requestsLoading && importRequests.length === 0" class="text-xs text-slate-500">当前项目暂无待审批申请。</p>
+      <div v-if="importRequests.length" class="max-h-52 overflow-y-auto rounded border border-slate-200">
+        <table class="min-w-full border-collapse text-xs">
+          <thead>
+            <tr class="border-b border-slate-200 bg-slate-50 text-slate-600">
+              <th class="px-3 py-1.5 text-left font-medium">申请人</th>
+              <th class="px-3 py-1.5 text-left font-medium">理由</th>
+              <th class="px-3 py-1.5 text-left font-medium">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="req in importRequests" :key="req.id" class="border-b border-slate-100">
+              <td class="px-3 py-1.5 text-slate-700">
+                {{ req.requester_name || '—' }}
+                <span class="text-slate-400">（{{ req.requester_role || '—' }}）</span>
+              </td>
+              <td class="px-3 py-1.5 text-slate-700">{{ req.reason || '—' }}</td>
+              <td class="px-3 py-1.5">
+                <button
+                  type="button"
+                  class="mr-1 rounded bg-green-600 px-2 py-0.5 text-white hover:bg-green-700"
+                  :disabled="requestHandlingId === req.id"
+                  @click="handleImportRequest(req, 'approve')"
+                >
+                  批准
+                </button>
+                <button
+                  type="button"
+                  class="rounded bg-red-100 px-2 py-0.5 text-red-700 hover:bg-red-200"
+                  :disabled="requestHandlingId === req.id"
+                  @click="handleImportRequest(req, 'reject')"
+                >
+                  拒绝
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
@@ -350,7 +429,10 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import { getSeasons, getSeasonProjects, getProjectImportConfig } from '@/api/eval'
-import { downloadImportTemplate, precheckImport, commitScoreImport } from '@/api/review'
+import { downloadImportTemplate, precheckImport, commitScoreImport, createImportPermissionRequest } from '@/api/review'
+import { getImportPermissionRequests, handleImportPermissionRequest } from '@/api/admin'
+import { useAuthStore } from '@/stores/auth'
+import { openPrompt, openAlert } from '@/utils/dialog'
 
 /** 周期列表 */
 const seasonOptions = ref([])
@@ -391,6 +473,37 @@ const templateError = ref('')
 const importableIndicators = ref([])
 const configLoading = ref(false)
 const configError = ref('')
+const currentImportConfig = ref({})
+const importPermissionStatus = ref('not_needed')
+const canImportNow = ref(true)
+const requestingPermission = ref(false)
+const requestError = ref('')
+const importRequests = ref([])
+const requestsLoading = ref(false)
+const requestsError = ref('')
+const requestHandlingId = ref(null)
+const auth = useAuthStore()
+
+const maxRoleLevel = computed(() => {
+  const roles = (auth.user?.user_roles ?? []).map((ur) => ur.role?.level ?? -1)
+  return roles.length ? Math.max(...roles) : -1
+})
+
+const importScopeLabel = computed(() => {
+  if (maxRoleLevel.value >= 5) return '全校范围'
+  if (maxRoleLevel.value >= 3) return '本院系范围'
+  if (maxRoleLevel.value >= 2) return '负责班级范围'
+  return '无导入权限'
+})
+
+const policyModeLabel = computed(() => (
+  currentImportConfig.value?.import_mode === 'upper_unified'
+    ? '上级统一导入'
+    : '下级自行导入'
+))
+
+const policyBlocked = computed(() => selectedProject.value && !canImportNow.value)
+const canApproveRequests = computed(() => maxRoleLevel.value >= 3)
 
 /**
  * 将嵌套树扁平化用于模板渲染，每个节点带 depth 表示缩进层级。
@@ -543,7 +656,7 @@ async function doDownloadTemplate() {
     const proj = selectedProjectObj.value
     await downloadImportTemplate(selectedProject.value, proj?.name ?? String(selectedProject.value))
   } catch (e) {
-    templateError.value = e.response?.data?.detail ?? '模板下载失败，请稍后重试'
+    templateError.value = e?.message || e.response?.data?.detail || '模板下载失败，请稍后重试'
   } finally {
     templateDownloading.value = false
   }
@@ -559,10 +672,98 @@ async function loadProjectImportConfig() {
   try {
     const data = await getProjectImportConfig(selectedProject.value)
     importableIndicators.value = Array.isArray(data.importable_indicators) ? data.importable_indicators : []
+    currentImportConfig.value = data.import_config ?? {}
+    importPermissionStatus.value = data.import_permission_status ?? 'not_needed'
+    canImportNow.value = !!data.can_import_now
   } catch (e) {
+    currentImportConfig.value = {}
+    importPermissionStatus.value = 'not_needed'
+    canImportNow.value = true
     configError.value = e.response?.data?.detail ?? '加载导入配置失败'
   } finally {
     configLoading.value = false
+  }
+  if (canApproveRequests.value) {
+    loadImportRequests()
+  }
+}
+
+async function requestImportPermission() {
+  if (!selectedProject.value) return
+  requestError.value = ''
+  const { confirmed, value } = await openPrompt({
+    title: '发起导入权限申请',
+    message: '请输入申请理由（将提交给直系上级审批）：',
+    confirmText: '提交申请',
+    inputPlaceholder: '例如：本班已完成复核，申请临时导入成绩',
+  })
+  if (!confirmed) return
+  const reason = String(value || '').trim()
+  if (!reason) {
+    requestError.value = '申请理由不能为空'
+    return
+  }
+  requestingPermission.value = true
+  try {
+    await createImportPermissionRequest(selectedProject.value, reason)
+    await openAlert({ title: '提交成功', message: '申请已提交，请等待直系上级审批。' })
+    await loadProjectImportConfig()
+  } catch (e) {
+    requestError.value = e.response?.data?.detail ?? '提交申请失败'
+  } finally {
+    requestingPermission.value = false
+  }
+}
+
+async function loadImportRequests() {
+  if (!selectedProject.value || !canApproveRequests.value) return
+  requestsLoading.value = true
+  requestsError.value = ''
+  try {
+    const data = await getImportPermissionRequests({ status: 'pending' })
+    const rows = Array.isArray(data) ? data : (data?.results ?? [])
+    importRequests.value = rows.filter((x) => Number(x.project) === Number(selectedProject.value))
+  } catch (e) {
+    requestsError.value = e.response?.data?.detail ?? '加载导入权限申请失败'
+    importRequests.value = []
+  } finally {
+    requestsLoading.value = false
+  }
+}
+
+async function handleImportRequest(req, action) {
+  requestHandlingId.value = req.id
+  try {
+    let body = { action }
+    if (action === 'reject') {
+      const input = await openPrompt({
+        title: '拒绝申请',
+        message: '请输入拒绝说明：',
+        inputPlaceholder: '请填写原因',
+        inputRequired: true,
+      })
+      if (!input?.confirmed) {
+        requestHandlingId.value = null
+        return
+      }
+      const comment = String(input.value || '').trim()
+      if (!comment) {
+        requestHandlingId.value = null
+        return
+      }
+      body = { action, comment }
+    }
+    await handleImportPermissionRequest(req.id, body)
+    await loadImportRequests()
+    await loadProjectImportConfig()
+  } catch (e) {
+    await openAlert({
+      title: '处理失败',
+      message: e.response?.data?.detail ?? '处理失败',
+      danger: true,
+    })
+  } finally {
+    requestHandlingId.value = null
   }
 }
 
@@ -578,6 +779,12 @@ watch(selectedSeason, (val) => {
   projectOptions.value = []
   importableIndicators.value = []
   configError.value = ''
+  currentImportConfig.value = {}
+  importPermissionStatus.value = 'not_needed'
+  canImportNow.value = true
+  requestError.value = ''
+  importRequests.value = []
+  requestsError.value = ''
   precheckResult.value = null
   previewToken.value = ''
   excludedRows.value = new Set()
@@ -588,6 +795,12 @@ watch(selectedSeason, (val) => {
 watch(selectedProject, () => {
   importableIndicators.value = []
   configError.value = ''
+  currentImportConfig.value = {}
+  importPermissionStatus.value = 'not_needed'
+  canImportNow.value = true
+  requestError.value = ''
+  importRequests.value = []
+  requestsError.value = ''
   precheckResult.value = null
   previewToken.value = ''
   excludedRows.value = new Set()

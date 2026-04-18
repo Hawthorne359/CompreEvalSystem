@@ -353,6 +353,7 @@ import {
 } from '@/api/users'
 import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import { formatDateTime } from '@/utils/format'
+import { openAlert, openConfirm } from '@/utils/dialog'
 
 const authStore = useAuthStore()
 const userListStore = useUserListStore()
@@ -613,15 +614,27 @@ function clearSelection() {
 async function onBatchSetActive(isActive) {
   if (selectedCount.value < 2) return
   const actionName = isActive ? '启用' : '禁用'
-  if (!window.confirm(`确定批量${actionName}选中的 ${selectedCount.value} 个用户吗？`)) return
+  const { confirmed } = await openConfirm({
+    title: '批量操作确认',
+    message: `确定批量${actionName}选中的 ${selectedCount.value} 个用户吗？`,
+    confirmText: '确认执行',
+  })
+  if (!confirmed) return
   bulkLoading.value = true
   try {
     await batchSetUserActive(selectedUserIds.value, isActive)
     selectedUserIds.value = []
     await loadUsers()
-    window.alert(`批量${actionName}成功`)
+    await openAlert({
+      title: '操作成功',
+      message: `批量${actionName}成功`,
+    })
   } catch (e) {
-    window.alert(e.response?.data?.detail ?? `批量${actionName}失败`)
+    await openAlert({
+      title: '操作失败',
+      message: e.response?.data?.detail ?? `批量${actionName}失败`,
+      danger: true,
+    })
   } finally {
     bulkLoading.value = false
   }
@@ -632,19 +645,36 @@ async function onBatchResetPassword() {
   if (selectedCount.value < 2) return
   const pwd = batchPassword.value.trim()
   if (pwd.length < 6) {
-    window.alert('请输入至少 6 位的新密码')
+    await openAlert({
+      title: '输入不完整',
+      message: '请输入至少 6 位的新密码',
+      danger: true,
+    })
     return
   }
-  if (!window.confirm(`确定将选中 ${selectedCount.value} 个用户密码重置为当前输入值吗？`)) return
+  const { confirmed } = await openConfirm({
+    title: '批量重置密码确认',
+    message: `确定将选中 ${selectedCount.value} 个用户密码重置为当前输入值吗？`,
+    confirmText: '确认重置',
+    danger: true,
+  })
+  if (!confirmed) return
   bulkLoading.value = true
   try {
     await batchResetUserPassword(selectedUserIds.value, pwd)
     batchPassword.value = ''
     selectedUserIds.value = []
     await loadUsers()
-    window.alert('批量重置密码成功')
+    await openAlert({
+      title: '操作成功',
+      message: '批量重置密码成功',
+    })
   } catch (e) {
-    window.alert(e.response?.data?.detail ?? '批量重置密码失败')
+    await openAlert({
+      title: '批量重置失败',
+      message: e.response?.data?.detail ?? '批量重置密码失败',
+      danger: true,
+    })
   } finally {
     bulkLoading.value = false
   }
@@ -655,18 +685,34 @@ async function onBatchSetRole() {
   if (selectedCount.value < 2 || !batchRoleId.value) return
   const role = assignableRoleList.value.find((r) => String(r.id) === String(batchRoleId.value))
   if (!role) {
-    window.alert('请选择有效角色')
+    await openAlert({
+      title: '请选择角色',
+      message: '请选择有效角色',
+      danger: true,
+    })
     return
   }
-  if (!window.confirm(`确定将选中 ${selectedCount.value} 个用户统一改为「${role.name}」吗？`)) return
+  const { confirmed } = await openConfirm({
+    title: '批量改角色确认',
+    message: `确定将选中 ${selectedCount.value} 个用户统一改为「${role.name}」吗？`,
+    confirmText: '确认修改',
+  })
+  if (!confirmed) return
   bulkLoading.value = true
   try {
     await batchSetUserRole(selectedUserIds.value, [Number(batchRoleId.value)], [])
     selectedUserIds.value = []
     await loadUsers()
-    window.alert('批量改角色成功')
+    await openAlert({
+      title: '操作成功',
+      message: '批量改角色成功',
+    })
   } catch (e) {
-    window.alert(e.response?.data?.detail ?? '批量改角色失败')
+    await openAlert({
+      title: '批量改角色失败',
+      message: e.response?.data?.detail ?? '批量改角色失败',
+      danger: true,
+    })
   } finally {
     bulkLoading.value = false
   }
@@ -675,15 +721,28 @@ async function onBatchSetRole() {
 /** 批量删除用户。 */
 async function onBatchDelete() {
   if (selectedCount.value < 2) return
-  if (!window.confirm(`确定永久删除选中的 ${selectedCount.value} 个用户吗？该操作不可恢复。`)) return
+  const { confirmed } = await openConfirm({
+    title: '批量删除确认',
+    message: `确定永久删除选中的 ${selectedCount.value} 个用户吗？该操作不可恢复。`,
+    confirmText: '确认删除',
+    danger: true,
+  })
+  if (!confirmed) return
   bulkLoading.value = true
   try {
     await batchDeleteUsers(selectedUserIds.value)
     selectedUserIds.value = []
     await loadUsers()
-    window.alert('批量删除成功')
+    await openAlert({
+      title: '操作成功',
+      message: '批量删除成功',
+    })
   } catch (e) {
-    window.alert(e.response?.data?.detail ?? '批量删除失败')
+    await openAlert({
+      title: '批量删除失败',
+      message: e.response?.data?.detail ?? '批量删除失败',
+      danger: true,
+    })
   } finally {
     bulkLoading.value = false
   }
@@ -696,14 +755,27 @@ async function onBatchDelete() {
 async function onDeleteUser(u) {
   if (!u?.id) return
   const displayName = fullName(u) === '—' ? u.username : `${fullName(u)}（${u.username}）`
-  if (!window.confirm(`确定删除用户 ${displayName} 吗？该操作不可恢复。`)) return
+  const { confirmed } = await openConfirm({
+    title: '删除用户确认',
+    message: `确定删除用户 ${displayName} 吗？该操作不可恢复。`,
+    confirmText: '确认删除',
+    danger: true,
+  })
+  if (!confirmed) return
   try {
     await deleteUser(u.id)
     selectedUserIds.value = selectedUserIds.value.filter((id) => id !== u.id)
     await loadUsers()
-    window.alert('删除成功')
+    await openAlert({
+      title: '操作成功',
+      message: '删除成功',
+    })
   } catch (e) {
-    window.alert(e.response?.data?.detail ?? '删除失败')
+    await openAlert({
+      title: '删除失败',
+      message: e.response?.data?.detail ?? '删除失败',
+      danger: true,
+    })
   }
 }
 

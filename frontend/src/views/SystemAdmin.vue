@@ -25,9 +25,9 @@
           >
             {{ tab.label }}
             <span
-              v-if="tab.key === 'requests' && latePendingCount > 0"
+              v-if="(tab.key === 'requests' && latePendingCount > 0) || (tab.key === 'importRequests' && importPendingCount > 0)"
               class="ml-1 rounded-full bg-red-500 px-1.5 py-0.5 text-xs text-white"
-            >{{ latePendingCount }}</span>
+            >{{ tab.key === 'requests' ? latePendingCount : importPendingCount }}</span>
           </button>
         </div>
       </div>
@@ -149,6 +149,74 @@
           </div>
           <p v-if="lateReqError" class="mt-2 text-sm text-red-600">{{ lateReqError }}</p>
         </div>
+        </div>
+
+        <!-- ── 子板块 A2：导入权限申请列表 ── -->
+        <div v-if="lateTab === 'importRequests'">
+          <div class="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <p class="text-sm text-slate-500 hidden md:block">下级在“上级统一导入”策略下提交的导入权限申请。</p>
+            <div class="flex items-center gap-2">
+              <select
+                v-model="importReqFilter"
+                class="flex-1 md:flex-none rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+                @change="loadImportPermissionRequests"
+              >
+                <option value="">全部</option>
+                <option value="pending">待审核</option>
+                <option value="approved">已批准</option>
+                <option value="rejected">已拒绝</option>
+              </select>
+              <button type="button" class="rounded border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50" @click="loadImportPermissionRequests">刷新</button>
+            </div>
+          </div>
+          <div v-if="importReqLoading" class="py-8 text-center text-sm text-slate-500">加载中…</div>
+          <div v-else-if="importReqs.length === 0" class="py-8 text-center text-sm text-slate-500">暂无导入权限申请</div>
+          <div v-else class="app-table-wrap">
+            <table class="app-table">
+              <thead class="bg-slate-50 text-slate-600">
+                <tr>
+                  <th class="px-3 py-2.5 text-left font-medium">申请人</th>
+                  <th class="px-3 py-2.5 text-left font-medium">项目</th>
+                  <th class="px-3 py-2.5 text-left font-medium">理由</th>
+                  <th class="px-3 py-2.5 text-left font-medium">状态</th>
+                  <th class="px-3 py-2.5 text-left font-medium">申请时间</th>
+                  <th class="px-3 py-2.5 text-left font-medium">操作</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100">
+                <tr v-for="req in importReqs" :key="req.id" class="hover:bg-slate-50">
+                  <td class="px-3 py-2.5 text-slate-700">
+                    <div class="font-medium">{{ req.requester_name || '—' }}</div>
+                    <div class="text-xs text-slate-500">{{ req.requester_role || '—' }}</div>
+                  </td>
+                  <td class="px-3 py-2.5 text-slate-600">{{ req.project_name || '—' }}</td>
+                  <td class="px-3 py-2.5 max-w-[220px] truncate text-slate-600" :title="req.reason">{{ req.reason || '—' }}</td>
+                  <td class="px-3 py-2.5">
+                    <span class="rounded px-2 py-0.5 text-xs font-medium" :class="reqStatusClass(req.status)">
+                      {{ req.status_label }}
+                    </span>
+                  </td>
+                  <td class="px-3 py-2.5 text-xs text-slate-500 whitespace-nowrap">{{ formatDateTime(req.created_at) }}</td>
+                  <td class="px-3 py-2.5">
+                    <template v-if="req.status === 'pending'">
+                      <button
+                        type="button"
+                        class="mr-1 rounded bg-green-600 px-2.5 py-1 text-xs text-white hover:bg-green-700"
+                        @click="approveImportRequest(req)"
+                      >批准</button>
+                      <button
+                        type="button"
+                        class="rounded bg-red-100 px-2.5 py-1 text-xs text-red-700 hover:bg-red-200"
+                        @click="rejectImportRequest(req)"
+                      >拒绝</button>
+                    </template>
+                    <span v-else class="text-xs text-slate-400">已处理</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-if="importReqError" class="mt-2 text-sm text-red-600">{{ importReqError }}</p>
         </div>
 
         <!-- ── 子板块 B：手动开启补交通道 ── -->
@@ -1222,6 +1290,7 @@ import api from '@/api/axios'
 import {
   getLateRequests, handleLateRequest, getLateChannels, createLateChannel, closeLateChannel,
   getLatePendingSubmissions, batchPushPendingSubmissions,
+  getImportPermissionRequests, handleImportPermissionRequest,
   getAuditLogs, getAuditLogDetail, getMyLogs, getMyLogDetail, scoreOverride, exportAuditLogs,
 } from '@/api/admin'
 import { getSeasons, getSeasonProjects } from '@/api/eval'
@@ -1229,6 +1298,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useRoleMetaStore } from '@/stores/roles'
 import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import { formatDateTime } from '@/utils/format'
+import { openAlert, openConfirm, openPrompt } from '@/utils/dialog'
 
 const auth = useAuthStore()
 const roleMeta = useRoleMetaStore()
@@ -1240,12 +1310,14 @@ const isSuperAdmin = computed(() => auth.isSuperAdmin)
 /* ─────────────── 补交通道子标签 ─────────────── */
 const lateChannelTabs = [
   { key: 'requests', label: '补交申请' },
+  { key: 'importRequests', label: '导入权限申请' },
   { key: 'open',     label: '手动开启通道' },
   { key: 'channels', label: '通道列表' },
   { key: 'push',     label: '待推送中心' },
 ]
 const lateTab = ref('requests')
 const latePendingCount = ref(0)
+const importPendingCount = ref(0)
 
 /**
  * 切换补交通道子标签时自动加载对应数据
@@ -1253,11 +1325,73 @@ const latePendingCount = ref(0)
  */
 function onLateTabChange(key) {
   if (key === 'requests') loadLateRequests()
+  else if (key === 'importRequests') loadImportPermissionRequests()
   else if (key === 'channels') {
     channelActiveOnly.value = true
     loadLateChannels()
   } else if (key === 'push') {
     loadLatePendingSubmissions()
+  }
+}
+
+/* ─────────────── 导入权限申请列表 ─────────────── */
+const importReqs = ref([])
+const importReqLoading = ref(false)
+const importReqError = ref('')
+const importReqFilter = ref('pending')
+
+async function loadImportPermissionRequests() {
+  importReqLoading.value = true
+  importReqError.value = ''
+  try {
+    const data = await getImportPermissionRequests(importReqFilter.value ? { status: importReqFilter.value } : {})
+    importReqs.value = Array.isArray(data) ? data : (data?.results ?? [])
+    importPendingCount.value = importReqs.value.filter((r) => r.status === 'pending').length
+  } catch (e) {
+    importReqError.value = e.response?.data?.detail ?? '加载导入权限申请失败'
+  } finally {
+    importReqLoading.value = false
+  }
+}
+
+async function approveImportRequest(req) {
+  const { confirmed } = await openConfirm({
+    title: '批准申请确认',
+    message: `确认批准 ${req.requester_name} 的导入权限申请？`,
+    confirmText: '确认批准',
+  })
+  if (!confirmed) return
+  try {
+    await handleImportPermissionRequest(req.id, { action: 'approve' })
+    await loadImportPermissionRequests()
+  } catch (e) {
+    await openAlert({
+      title: '操作失败',
+      message: e.response?.data?.detail ?? '操作失败',
+      danger: true,
+    })
+  }
+}
+
+async function rejectImportRequest(req) {
+  const input = await openPrompt({
+    title: '拒绝申请',
+    message: '请输入拒绝说明：',
+    inputPlaceholder: '请填写拒绝原因',
+    inputRequired: true,
+  })
+  if (!input?.confirmed) return
+  const comment = String(input.value || '').trim()
+  if (!comment) return
+  try {
+    await handleImportPermissionRequest(req.id, { action: 'reject', comment })
+    await loadImportPermissionRequests()
+  } catch (e) {
+    await openAlert({
+      title: '操作失败',
+      message: e.response?.data?.detail ?? '操作失败',
+      danger: true,
+    })
   }
 }
 
@@ -1296,12 +1430,22 @@ function reqStatusClass(s) {
 
 /** 拒绝申请 */
 async function rejectRequest(req) {
-  if (!window.confirm(`确认拒绝 ${req.student_name} 的补交申请？`)) return
+  const { confirmed } = await openConfirm({
+    title: '拒绝申请确认',
+    message: `确认拒绝 ${req.student_name} 的补交申请？`,
+    confirmText: '确认拒绝',
+    danger: true,
+  })
+  if (!confirmed) return
   try {
     await handleLateRequest(req.id, { action: 'reject', comment: '管理员拒绝' })
     await loadLateRequests()
   } catch (e) {
-    alert(e.response?.data?.detail ?? '操作失败')
+    await openAlert({
+      title: '操作失败',
+      message: e.response?.data?.detail ?? '操作失败',
+      danger: true,
+    })
   }
 }
 
@@ -1665,14 +1809,26 @@ function toggleSelectAllPending() {
 }
 
 async function pushSinglePending(sub) {
-  if (!window.confirm(`确认推送 ${sub.student_name}（${sub.student_no || '无学号'}）这条补交记录到评审流程吗？`)) return
+  const { confirmed } = await openConfirm({
+    title: '推送确认',
+    message: `确认推送 ${sub.student_name}（${sub.student_no || '无学号'}）这条补交记录到评审流程吗？`,
+    confirmText: '确认推送',
+  })
+  if (!confirmed) return
   pendingPushLoading.value = true
   try {
     const result = await batchPushPendingSubmissions([sub.id])
-    alert(result.detail ?? `已推送 ${result.pushed_count ?? 0} 条记录`)
+    await openAlert({
+      title: '操作结果',
+      message: result.detail ?? `已推送 ${result.pushed_count ?? 0} 条记录`,
+    })
     await loadLatePendingSubmissions()
   } catch (e) {
-    alert(e.response?.data?.detail ?? '推送失败，请重试')
+    await openAlert({
+      title: '推送失败',
+      message: e.response?.data?.detail ?? '推送失败，请重试',
+      danger: true,
+    })
   } finally {
     pendingPushLoading.value = false
   }
@@ -1680,18 +1836,34 @@ async function pushSinglePending(sub) {
 
 async function batchPushSelectedPending() {
   if (selectedPendingSubmissionIds.value.length === 0) {
-    alert('请先勾选待推送记录')
+    await openAlert({
+      title: '请选择记录',
+      message: '请先勾选待推送记录',
+      danger: true,
+    })
     return
   }
-  if (!window.confirm(`确认批量推送已选的 ${selectedPendingSubmissionIds.value.length} 条补交记录吗？`)) return
+  const { confirmed } = await openConfirm({
+    title: '批量推送确认',
+    message: `确认批量推送已选的 ${selectedPendingSubmissionIds.value.length} 条补交记录吗？`,
+    confirmText: '确认推送',
+  })
+  if (!confirmed) return
   pendingPushLoading.value = true
   try {
     const result = await batchPushPendingSubmissions(selectedPendingSubmissionIds.value)
-    alert(result.detail ?? `已推送 ${result.pushed_count ?? 0} 条记录`)
+    await openAlert({
+      title: '操作结果',
+      message: result.detail ?? `已推送 ${result.pushed_count ?? 0} 条记录`,
+    })
     selectedPendingSubmissionIds.value = []
     await loadLatePendingSubmissions()
   } catch (e) {
-    alert(e.response?.data?.detail ?? '批量推送失败，请重试')
+    await openAlert({
+      title: '批量推送失败',
+      message: e.response?.data?.detail ?? '批量推送失败，请重试',
+      danger: true,
+    })
   } finally {
     pendingPushLoading.value = false
   }
@@ -1703,13 +1875,23 @@ async function batchPushSelectedPending() {
  */
 async function closeChannel(ch) {
   const target = ch.target_user_name ?? ch.target_class_name ?? `通道#${ch.id}`
-  if (!window.confirm(`确认立即关闭 ${target} 的补交通道？`)) return
+  const { confirmed } = await openConfirm({
+    title: '关闭通道确认',
+    message: `确认立即关闭 ${target} 的补交通道？`,
+    confirmText: '确认关闭',
+    danger: true,
+  })
+  if (!confirmed) return
   closingChannelId.value = ch.id
   try {
     await closeLateChannel(ch.id, '管理员手动关闭')
     await loadLateChannels()
   } catch (e) {
-    alert(e.response?.data?.detail ?? '关闭失败')
+    await openAlert({
+      title: '关闭失败',
+      message: e.response?.data?.detail ?? '关闭失败',
+      danger: true,
+    })
   } finally {
     closingChannelId.value = null
   }
@@ -1861,7 +2043,11 @@ async function loadAuditLogs(soft = false) {
 /** 导出操作日志 CSV（仅超级管理员可调用后端导出接口） */
 async function doExportLogs() {
   if (!isSuperAdmin.value) {
-    alert(`仅${superAdminLabel.value}可导出操作日志`)
+    await openAlert({
+      title: '无权限',
+      message: `仅${superAdminLabel.value}可导出操作日志`,
+      danger: true,
+    })
     return
   }
   audit.exportLoading = true
@@ -1880,7 +2066,11 @@ async function doExportLogs() {
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
   } catch (e) {
-    alert(e.response?.data?.detail ?? '导出失败，请重试')
+    await openAlert({
+      title: '导出失败',
+      message: e.response?.data?.detail ?? '导出失败，请重试',
+      danger: true,
+    })
   } finally {
     audit.exportLoading = false
   }
@@ -2029,6 +2219,7 @@ useRealtimeRefresh('audit_log', loadAuditLogs)
 
 onMounted(() => {
   loadLateRequests()
+  loadImportPermissionRequests()
   loadSeasons()
   loadDepartments()
   loadAuditLogs()

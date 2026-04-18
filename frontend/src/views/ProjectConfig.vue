@@ -21,41 +21,42 @@
 
     <template v-else>
       <section class="app-surface mb-4 p-4">
-        <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <label class="block text-sm text-slate-700">
-              模板名称（保存时使用）
-              <input
-                v-model="templateDraft.name"
-                type="text"
-                class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
-                placeholder="如：2024-综合测评标准模板"
-              />
-            </label>
-            <label class="block text-sm text-slate-700">
-              可见范围
-              <select
-                v-model="templateDraft.visibility"
-                class="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
-              >
-                <option value="private">仅自己可见</option>
-                <option value="global">全局可见</option>
-              </select>
-            </label>
-            <label class="block text-sm text-slate-700 sm:col-span-2">
-              套用模板
-              <select
-                v-model="selectedTemplateId"
-                class="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
-              >
-                <option value="">请选择模板</option>
-                <option v-for="tpl in templateList" :key="tpl.id" :value="String(tpl.id)">
-                  {{ tpl.name }}（{{ tpl.created_by_name || '未知创建人' }}）
-                </option>
-              </select>
-            </label>
-          </div>
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <label class="block text-sm text-slate-700">
+            模板名称（保存时使用）
+            <input
+              v-model="templateDraft.name"
+              type="text"
+              class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
+              placeholder="如：2024-综合测评标准模板"
+            />
+          </label>
+          <label class="block text-sm text-slate-700">
+            可见范围
+            <select
+              v-model="templateDraft.visibility"
+              class="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
+            >
+              <option value="private">仅自己可见</option>
+              <option value="global">全局可见</option>
+            </select>
+          </label>
+          <label class="block text-sm text-slate-700 sm:col-span-2">
+            套用模板
+            <select
+              v-model="selectedTemplateId"
+              class="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
+            >
+              <option value="">请选择模板</option>
+              <option v-for="tpl in templateList" :key="tpl.id" :value="String(tpl.id)">
+                {{ tpl.name }}（{{ tpl.created_by_name || '未知创建人' }}）
+              </option>
+            </select>
+          </label>
+        </div>
+        <div class="mt-3 rounded border border-slate-200 bg-slate-50 px-3 py-2">
           <div class="flex flex-wrap items-center gap-2">
+            <span class="rounded bg-white px-2 py-1 text-xs font-medium text-slate-500">主操作</span>
             <button
               type="button"
               class="app-btn app-btn-secondary disabled:opacity-50"
@@ -71,6 +72,49 @@
               @click="applySelectedTemplate"
             >
               {{ templateApplying ? '应用中…' : '套用模板' }}
+            </button>
+
+            <span class="ml-2 rounded bg-white px-2 py-1 text-xs font-medium text-slate-500">导入 / 导出</span>
+            <label
+              class="cursor-pointer rounded border border-violet-300 px-3 py-2 text-sm text-violet-700 hover:bg-violet-50"
+              :class="templateImporting ? 'pointer-events-none opacity-50' : ''"
+            >
+              {{ templateImporting ? '导入中…' : '导入模板文件' }}
+              <input type="file" accept=".json" class="hidden" @change="importTemplateFile" />
+            </label>
+            <button
+              type="button"
+              class="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700 hover:bg-sky-50 disabled:opacity-50"
+              :disabled="exportCurrentLoading"
+              @click="exportCurrentConfig"
+            >
+              {{ exportCurrentLoading ? '导出中…' : '导出当前配置' }}
+            </button>
+            <button
+              type="button"
+              class="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700 hover:bg-sky-50 disabled:opacity-50"
+              :disabled="exportTemplateLoading || !selectedTemplateId"
+              @click="exportSelectedTemplate"
+            >
+              {{ exportTemplateLoading ? '导出中…' : '导出所选模板' }}
+            </button>
+
+            <span class="ml-2 rounded bg-white px-2 py-1 text-xs font-medium text-slate-500">模板管理</span>
+            <button
+              type="button"
+              class="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              :disabled="templateRenaming || !selectedTemplateId"
+              @click="updateSelectedTemplateMeta"
+            >
+              {{ templateRenaming ? '更新中…' : '更新模板信息' }}
+            </button>
+            <button
+              type="button"
+              class="rounded border border-rose-300 px-3 py-2 text-sm text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+              :disabled="templateDeleting || !selectedTemplateId"
+              @click="deleteSelectedTemplate"
+            >
+              {{ templateDeleting ? '删除中…' : '删除模板' }}
             </button>
             <button
               type="button"
@@ -107,6 +151,13 @@
             一键全选
           </button>
         </div>
+        <p v-if="!templateLoading && !templateList.length" class="mt-2 text-sm text-amber-700">
+          当前没有可用模板，请先“保存为模板”或导入模板文件。
+        </p>
+        <p v-if="selectedTemplateObj" class="mt-2 text-xs text-slate-500">
+          已选模板：{{ selectedTemplateObj.name }}（{{ selectedTemplateObj.visibility === 'global' ? '全局可见' : '仅自己可见' }}）
+        </p>
+        <p v-if="templateNotice" class="mt-2 text-sm text-emerald-600">{{ templateNotice }}</p>
         <p v-if="templateError" class="mt-2 text-sm text-red-600">{{ templateError }}</p>
       </section>
 
@@ -216,6 +267,102 @@
               class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
             />
           </label>
+          <div class="rounded border border-slate-200 bg-slate-50 p-3 space-y-3">
+            <p class="text-xs font-medium text-slate-700">统一导入策略</p>
+            <label class="block text-sm text-slate-700">
+              学生匹配字段
+              <select
+                v-model="importConfigForm.student_field"
+                class="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
+                :disabled="importConfigLoading || importConfigSaving"
+              >
+                <option value="student_no">学号（推荐）</option>
+                <option value="username">用户名</option>
+              </select>
+            </label>
+            <label class="block text-sm text-slate-700">
+              导入备注
+              <input
+                v-model="importConfigForm.comment"
+                type="text"
+                class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
+                :disabled="importConfigLoading || importConfigSaving"
+              />
+            </label>
+            <label class="block text-sm text-slate-700">
+              导入模式
+              <select
+                v-model="importConfigForm.import_mode"
+                class="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
+                :disabled="importConfigLoading || importConfigSaving"
+              >
+                <option value="subordinate_self">下级自行导入</option>
+                <option value="upper_unified">上级统一导入</option>
+              </select>
+            </label>
+            <label class="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                v-model="importConfigForm.subordinate_requires_approval"
+                type="checkbox"
+                class="rounded border-slate-300"
+                :disabled="importConfigLoading || importConfigSaving"
+              />
+              下级导入需审批
+            </label>
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                class="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                :disabled="importConfigLoading || importConfigSaving"
+                @click="saveImportConfig"
+              >
+                {{ importConfigSaving ? '保存中…' : '保存导入策略' }}
+              </button>
+              <span v-if="importConfigLoading" class="text-xs text-slate-500">加载中…</span>
+            </div>
+            <p v-if="importConfigError" class="text-xs text-red-600">{{ importConfigError }}</p>
+          </div>
+          <div class="rounded border border-slate-200 bg-slate-50 p-3 space-y-3">
+            <p class="text-xs font-medium text-slate-700">学生报表可见策略</p>
+            <label class="flex items-center gap-2 text-sm text-slate-700">
+              <input v-model="visibilityForm.ranking_enabled" type="checkbox" class="rounded border-slate-300" :disabled="visibilityLoading || visibilitySaving" />
+              开放排名（学生可查看班级/专业排名榜）
+            </label>
+            <label class="block text-sm text-slate-700">
+              排名范围
+              <select v-model="visibilityForm.ranking_scope" class="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none" :disabled="visibilityLoading || visibilitySaving || !visibilityForm.ranking_enabled">
+                <option value="class">本班</option>
+                <option value="major">本专业</option>
+              </select>
+            </label>
+            <label class="flex items-center gap-2 text-sm text-slate-700">
+              <input v-model="visibilityForm.show_peer_identity" type="checkbox" class="rounded border-slate-300" :disabled="visibilityLoading || visibilitySaving || !visibilityForm.ranking_enabled" />
+              显示他人姓名/学号
+            </label>
+            <label class="flex items-center gap-2 text-sm text-slate-700">
+              <input v-model="visibilityForm.show_total_score" type="checkbox" class="rounded border-slate-300" :disabled="visibilityLoading || visibilitySaving || !visibilityForm.ranking_enabled" />
+              显示他人总分
+            </label>
+            <label class="flex items-center gap-2 text-sm text-slate-700">
+              <input v-model="visibilityForm.show_indicator_breakdown" type="checkbox" class="rounded border-slate-300" :disabled="visibilityLoading || visibilitySaving || !visibilityForm.ranking_enabled" />
+              显示他人分项得分明细
+            </label>
+            <label class="flex items-center gap-2 text-sm text-slate-700">
+              <input v-model="visibilityForm.show_my_rank_in_class" type="checkbox" class="rounded border-slate-300" :disabled="visibilityLoading || visibilitySaving || !visibilityForm.ranking_enabled" />
+              显示"我在本班排名"
+            </label>
+            <label class="flex items-center gap-2 text-sm text-slate-700">
+              <input v-model="visibilityForm.show_my_rank_in_major" type="checkbox" class="rounded border-slate-300" :disabled="visibilityLoading || visibilitySaving || !visibilityForm.ranking_enabled" />
+              显示"我在本专业排名"
+            </label>
+            <div class="flex items-center gap-2">
+              <button type="button" class="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50" :disabled="visibilityLoading || visibilitySaving" @click="saveVisibilityConfig">
+                {{ visibilitySaving ? '保存中…' : '保存可见策略' }}
+              </button>
+              <span v-if="visibilityLoading" class="text-xs text-slate-500">加载中…</span>
+            </div>
+            <p v-if="visibilityError" class="text-xs text-red-600">{{ visibilityError }}</p>
+          </div>
           <p v-if="basicError" class="text-sm text-red-600">{{ basicError }}</p>
           <button
             type="submit"
@@ -1027,7 +1174,7 @@
 /**
  * 项目配置页：基本信息、指标结构（两级树）、总分权重规则、评审规则。
  */
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import IndicatorTreeNode from './IndicatorTreeNode.vue'
@@ -1042,14 +1189,24 @@ import {
   updateWeightRule,
   getReviewRule,
   updateReviewRule,
+  getProjectImportConfig,
+  updateProjectImportConfig,
+  getReportVisibilityConfig,
+  updateReportVisibilityConfig,
   getSeasons,
   getProjectConfigTemplates,
+  updateProjectConfigTemplate,
+  deleteProjectConfigTemplate,
   saveProjectConfigTemplate,
   applyProjectConfigTemplate,
+  exportProjectConfigTemplate,
+  importProjectConfigTemplate,
+  exportCurrentProjectConfig,
 } from '@/api/eval'
 import { generateReviewAssignments, getProjectAssignmentSummary } from '@/api/review'
 import { formatDateTime } from '@/utils/format'
 import { useRoleMetaStore } from '@/stores/roles'
+import { openConfirm } from '@/utils/dialog'
 
 const route = useRoute()
 const roleMeta = useRoleMetaStore()
@@ -1073,6 +1230,8 @@ const templateLoading = ref(false)
 const templateSaving = ref(false)
 const templateApplying = ref(false)
 const templateError = ref('')
+const templateNotice = ref('')
+let templateNoticeTimer = null
 const selectedTemplateId = ref('')
 const templateDraft = ref({
   name: '',
@@ -1084,6 +1243,22 @@ const templateDraft = ref({
     review: true,
   },
 })
+const selectedTemplateObj = computed(() => (
+  templateList.value.find((tpl) => String(tpl.id) === String(selectedTemplateId.value)) || null
+))
+
+function setTemplateNotice(message) {
+  templateNotice.value = message
+  if (templateNoticeTimer) {
+    clearTimeout(templateNoticeTimer)
+    templateNoticeTimer = null
+  }
+  if (!message) return
+  templateNoticeTimer = setTimeout(() => {
+    templateNotice.value = ''
+    templateNoticeTimer = null
+  }, 4000)
+}
 
 function pickedTemplateSections() {
   const sec = templateDraft.value.sections
@@ -1100,13 +1275,18 @@ function selectAllTemplateSections() {
 }
 
 async function loadTemplateList() {
+  const prevSelectedId = selectedTemplateId.value
   templateLoading.value = true
   templateError.value = ''
   try {
     templateList.value = await getProjectConfigTemplates()
+    if (prevSelectedId && !templateList.value.some((tpl) => String(tpl.id) === String(prevSelectedId))) {
+      selectedTemplateId.value = ''
+    }
   } catch (e) {
     templateError.value = e.response?.data?.detail ?? '加载模板列表失败'
     templateList.value = []
+    selectedTemplateId.value = ''
   } finally {
     templateLoading.value = false
   }
@@ -1114,6 +1294,7 @@ async function loadTemplateList() {
 
 async function saveTemplateFromCurrent() {
   templateError.value = ''
+  templateNotice.value = ''
   const name = (templateDraft.value.name || '').trim()
   if (!name) {
     templateError.value = '请先输入模板名称'
@@ -1126,12 +1307,14 @@ async function saveTemplateFromCurrent() {
   }
   templateSaving.value = true
   try {
-    await saveProjectConfigTemplate(projectId.value, {
+    const saved = await saveProjectConfigTemplate(projectId.value, {
       name,
       visibility: templateDraft.value.visibility || 'private',
       sections,
     })
     await loadTemplateList()
+    selectedTemplateId.value = String(saved.id)
+    setTemplateNotice(`模板“${saved.name}”已保存`)
   } catch (e) {
     templateError.value = e.response?.data?.detail ?? '保存模板失败'
   } finally {
@@ -1141,6 +1324,7 @@ async function saveTemplateFromCurrent() {
 
 async function applySelectedTemplate() {
   templateError.value = ''
+  templateNotice.value = ''
   if (!selectedTemplateId.value) {
     templateError.value = '请先选择模板'
     return
@@ -1150,8 +1334,12 @@ async function applySelectedTemplate() {
     templateError.value = '请至少选择一个应用片段'
     return
   }
-  const ok = window.confirm('套用模板会覆盖你选中的配置片段，是否继续？')
-  if (!ok) return
+  const { confirmed } = await openConfirm({
+    title: '套用模板确认',
+    message: '套用模板会覆盖你选中的配置片段，是否继续？',
+    confirmText: '确认套用',
+  })
+  if (!confirmed) return
   templateApplying.value = true
   try {
     await applyProjectConfigTemplate(projectId.value, Number(selectedTemplateId.value), { sections })
@@ -1159,10 +1347,159 @@ async function applySelectedTemplate() {
     await loadIndicators()
     await loadWeightRule()
     await loadReviewRule()
+    setTemplateNotice('模板套用成功')
   } catch (e) {
     templateError.value = e.response?.data?.detail ?? '套用模板失败'
   } finally {
     templateApplying.value = false
+  }
+}
+
+const exportCurrentLoading = ref(false)
+const exportTemplateLoading = ref(false)
+const templateImporting = ref(false)
+const templateRenaming = ref(false)
+const templateDeleting = ref(false)
+
+function _triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  setTimeout(() => {
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }, 200)
+}
+
+async function exportCurrentConfig() {
+  templateError.value = ''
+  templateNotice.value = ''
+  const sections = pickedTemplateSections()
+  if (!sections.length) {
+    templateError.value = '请至少选择一个导出片段'
+    return
+  }
+  exportCurrentLoading.value = true
+  try {
+    const name = (templateDraft.value.name || project.value?.name || '项目配置').trim()
+    const { blob, filename } = await exportCurrentProjectConfig(projectId.value, { sections, name })
+    _triggerDownload(blob, filename)
+  } catch (e) {
+    templateError.value = e.response?.data?.detail ?? '导出失败'
+  } finally {
+    exportCurrentLoading.value = false
+  }
+}
+
+async function exportSelectedTemplate() {
+  templateError.value = ''
+  templateNotice.value = ''
+  if (!selectedTemplateId.value) {
+    templateError.value = '请先选择要导出的模板'
+    return
+  }
+  exportTemplateLoading.value = true
+  try {
+    const { blob, filename } = await exportProjectConfigTemplate(Number(selectedTemplateId.value))
+    _triggerDownload(blob, filename)
+  } catch (e) {
+    templateError.value = e.response?.data?.detail ?? '导出模板失败'
+  } finally {
+    exportTemplateLoading.value = false
+  }
+}
+
+async function importTemplateFile(event) {
+  templateError.value = ''
+  templateNotice.value = ''
+  const file = event.target.files?.[0]
+  if (!file) return
+  event.target.value = ''
+  templateImporting.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('visibility', templateDraft.value.visibility || 'private')
+    const draftName = (templateDraft.value.name || '').trim()
+    if (draftName) formData.append('name', draftName)
+    const imported = await importProjectConfigTemplate(formData)
+    await loadTemplateList()
+    selectedTemplateId.value = String(imported.id)
+    setTemplateNotice(`模板“${imported.name}”导入成功`)
+  } catch (e) {
+    templateError.value = e.response?.data?.detail ?? '导入模板失败'
+  } finally {
+    templateImporting.value = false
+  }
+}
+
+async function updateSelectedTemplateMeta() {
+  templateError.value = ''
+  templateNotice.value = ''
+  if (!selectedTemplateObj.value) {
+    templateError.value = '请先选择模板'
+    return
+  }
+  const nextName = (templateDraft.value.name || selectedTemplateObj.value.name || '').trim()
+  const nextVisibility = templateDraft.value.visibility || selectedTemplateObj.value.visibility
+  if (!nextName) {
+    templateError.value = '模板名称不能为空'
+    return
+  }
+  const unchanged = (
+    nextName === selectedTemplateObj.value.name
+    && nextVisibility === selectedTemplateObj.value.visibility
+  )
+  if (unchanged) {
+    templateError.value = '模板名称和可见范围都未变化'
+    return
+  }
+  templateRenaming.value = true
+  try {
+    const updated = await updateProjectConfigTemplate(Number(selectedTemplateId.value), {
+      name: nextName,
+      visibility: nextVisibility,
+    })
+    await loadTemplateList()
+    selectedTemplateId.value = String(updated.id)
+    templateDraft.value.name = updated.name
+    templateDraft.value.visibility = updated.visibility
+    setTemplateNotice(`模板“${updated.name}”已更新`)
+  } catch (e) {
+    templateError.value = e.response?.data?.detail ?? '更新模板失败'
+  } finally {
+    templateRenaming.value = false
+  }
+}
+
+async function deleteSelectedTemplate() {
+  templateError.value = ''
+  templateNotice.value = ''
+  if (!selectedTemplateObj.value) {
+    templateError.value = '请先选择模板'
+    return
+  }
+  const { confirmed } = await openConfirm({
+    title: '删除模板确认',
+    message: `确定删除模板“${selectedTemplateObj.value.name}”吗？删除后不可恢复。`,
+    confirmText: '确认删除',
+    danger: true,
+  })
+  if (!confirmed) return
+  templateDeleting.value = true
+  try {
+    const deletedName = selectedTemplateObj.value.name
+    await deleteProjectConfigTemplate(Number(selectedTemplateId.value))
+    selectedTemplateId.value = ''
+    await loadTemplateList()
+    setTemplateNotice(`模板“${deletedName}”已删除`)
+  } catch (e) {
+    templateError.value = e.response?.data?.detail ?? '删除模板失败'
+  } finally {
+    templateDeleting.value = false
   }
 }
 
@@ -1187,6 +1524,28 @@ const basicForm = ref({
 })
 const basicSaving = ref(false)
 const basicError = ref('')
+const importConfigForm = ref({
+  student_field: 'student_no',
+  comment: '批量导入',
+  import_mode: 'subordinate_self',
+  subordinate_requires_approval: true,
+})
+const importConfigLoading = ref(false)
+const importConfigSaving = ref(false)
+const importConfigError = ref('')
+
+const visibilityForm = ref({
+  ranking_enabled: false,
+  ranking_scope: 'class',
+  show_peer_identity: false,
+  show_total_score: true,
+  show_indicator_breakdown: false,
+  show_my_rank_in_class: true,
+  show_my_rank_in_major: false,
+})
+const visibilityLoading = ref(false)
+const visibilitySaving = ref(false)
+const visibilityError = ref('')
 
 /** Season datetime-local min/max for input constraints */
 const seasonMinDatetime = computed(() => toLocalDatetimeStr(project.value?.season_start_time))
@@ -1395,6 +1754,75 @@ async function loadReviewRule() {
     // 保持默认
   } finally {
     reviewLoading.value = false
+  }
+}
+
+async function loadImportConfig() {
+  if (!projectId.value) return
+  importConfigLoading.value = true
+  importConfigError.value = ''
+  try {
+    const data = await getProjectImportConfig(projectId.value)
+    const cfg = data.import_config || {}
+    importConfigForm.value = {
+      student_field: cfg.student_field || 'student_no',
+      comment: cfg.comment || '批量导入',
+      import_mode: cfg.import_mode || 'subordinate_self',
+      subordinate_requires_approval: cfg.subordinate_requires_approval ?? true,
+    }
+  } catch (e) {
+    importConfigError.value = e.response?.data?.detail ?? '加载导入配置失败'
+  } finally {
+    importConfigLoading.value = false
+  }
+}
+
+async function saveImportConfig() {
+  if (!projectId.value) return
+  importConfigSaving.value = true
+  importConfigError.value = ''
+  try {
+    await updateProjectImportConfig(projectId.value, { ...importConfigForm.value })
+  } catch (e) {
+    importConfigError.value = e.response?.data?.detail ?? '保存导入配置失败'
+  } finally {
+    importConfigSaving.value = false
+  }
+}
+
+async function loadVisibilityConfig() {
+  if (!projectId.value) return
+  visibilityLoading.value = true
+  visibilityError.value = ''
+  try {
+    const data = await getReportVisibilityConfig(projectId.value)
+    const cfg = data.report_visibility_config || {}
+    visibilityForm.value = {
+      ranking_enabled: cfg.ranking_enabled ?? false,
+      ranking_scope: cfg.ranking_scope || 'class',
+      show_peer_identity: cfg.show_peer_identity ?? false,
+      show_total_score: cfg.show_total_score ?? true,
+      show_indicator_breakdown: cfg.show_indicator_breakdown ?? false,
+      show_my_rank_in_class: cfg.show_my_rank_in_class ?? true,
+      show_my_rank_in_major: cfg.show_my_rank_in_major ?? false,
+    }
+  } catch {
+    // keep defaults
+  } finally {
+    visibilityLoading.value = false
+  }
+}
+
+async function saveVisibilityConfig() {
+  if (!projectId.value) return
+  visibilitySaving.value = true
+  visibilityError.value = ''
+  try {
+    await updateReportVisibilityConfig(projectId.value, { ...visibilityForm.value })
+  } catch (e) {
+    visibilityError.value = e.response?.data?.detail ?? '保存可见策略失败'
+  } finally {
+    visibilitySaving.value = false
   }
 }
 
@@ -1869,7 +2297,16 @@ onMounted(async () => {
   await loadIndicators()
   loadWeightRule()
   loadReviewRule()
+  loadImportConfig()
+  loadVisibilityConfig()
   loadTemplateList()
+})
+
+onUnmounted(() => {
+  if (templateNoticeTimer) {
+    clearTimeout(templateNoticeTimer)
+    templateNoticeTimer = null
+  }
 })
 
 useRealtimeRefresh(['project', 'indicator', 'weight_rule', 'review_rule'], () => {
@@ -1877,6 +2314,8 @@ useRealtimeRefresh(['project', 'indicator', 'weight_rule', 'review_rule'], () =>
   loadIndicators()
   loadWeightRule()
   loadReviewRule()
+  loadImportConfig()
+  loadVisibilityConfig()
   loadTemplateList()
 })
 
@@ -1933,7 +2372,15 @@ watch(projectId, () => {
   loadIndicators()
   loadWeightRule()
   loadReviewRule()
+  loadImportConfig()
+  loadVisibilityConfig()
   loadTemplateList()
+})
+
+watch(selectedTemplateObj, (tpl) => {
+  if (!tpl) return
+  templateDraft.value.name = tpl.name || ''
+  templateDraft.value.visibility = tpl.visibility || 'private'
 })
 </script>
 

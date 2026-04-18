@@ -24,6 +24,13 @@ python manage.py migrate --noinput
 echo "==> 初始化超级管理员..."
 python manage.py init_superadmin
 
+echo "==> 检查 PDF 转换组件..."
+if command -v soffice >/dev/null 2>&1; then
+    echo "==> LibreOffice 已就绪：$(soffice --version 2>/dev/null | head -n 1)"
+else
+    echo "==> 警告：未检测到 LibreOffice（soffice），模板 PDF 导出将自动回退为 Word"
+fi
+
 echo "==> 启动 Uvicorn..."
 exec uvicorn CompreEvalSystem.asgi:application \
     --host 0.0.0.0 \

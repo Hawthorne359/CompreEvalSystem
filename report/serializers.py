@@ -3,7 +3,7 @@
 """
 from rest_framework import serializers
 
-from .models import ReportExportTemplate, ReportExportMapping
+from .models import ReportExportTemplate, ReportExportMapping, ReportExportFieldPreference
 from .services import validate_export_mapping_config
 
 
@@ -67,3 +67,36 @@ class ReportExportMappingSerializer(serializers.ModelSerializer):
         except ValueError as exc:
             raise serializers.ValidationError({'config': str(exc)}) from exc
         return attrs
+
+
+class ReportExportFieldPreferenceSerializer(serializers.ModelSerializer):
+    """用户导出字段偏好序列化。"""
+
+    class Meta:
+        model = ReportExportFieldPreference
+        fields = [
+            'id',
+            'user',
+            'project',
+            'common_field_keys',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['user', 'project', 'created_at', 'updated_at']
+
+    def validate_common_field_keys(self, value):
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError('common_field_keys 必须为数组')
+        cleaned = []
+        seen = set()
+        for item in value:
+            key = str(item or '').strip()
+            if not key:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(key)
+        return cleaned

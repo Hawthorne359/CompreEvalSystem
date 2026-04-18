@@ -2,6 +2,14 @@
   <div class="page-shell max-w-5xl" @click="clearHighlight">
     <div class="flex items-center justify-between">
       <h2 class="app-page-title">申诉列表</h2>
+      <button
+        v-if="!isReviewer"
+        type="button"
+        class="rounded-lg bg-brand-500 px-3 py-1.5 text-sm text-white hover:bg-brand-600"
+        @click="openNewAppealModal"
+      >
+        发起独立申诉
+      </button>
     </div>
 
     <!-- 状态筛�?-->
@@ -51,7 +59,7 @@
           >
               <div class="mobile-card-body">
               <div class="flex items-center gap-2">
-                <span class="mobile-card-title">{{ appeal.project_name || '—' }}</span>
+                <span class="mobile-card-title">{{ appeal.title || appeal.submission_detail?.project_name || '—' }}</span>
                 <span class="flex-shrink-0 rounded px-1.5 py-0.5 text-[10px]" :class="appealStatusClass(appeal.status)">
                   {{ appealStatusLabel(appeal.status) }}
                 </span>
@@ -81,15 +89,17 @@
             <tr v-for="appeal in appeals" :key="appeal.id" :class="appeal.id === lastHighlightId ? 'bg-blue-50' : 'hover:bg-slate-50'">
               <td class="px-4 py-3 text-slate-700">
                 <router-link
+                  v-if="appeal.submission"
                   :to="`/submissions/${appeal.submission}`"
-                    class="app-link"
-                  >
-                    #{{ appeal.submission }}
+                  class="app-link"
+                >
+                  #{{ appeal.submission }}
                 </router-link>
+                <span v-else class="text-xs text-slate-400">独立申诉</span>
               </td>
-              <td class="px-4 py-3 text-slate-700">{{ appeal.project_name || '—' }}</td>
-              <td v-if="isReviewer" class="px-4 py-3 text-slate-700">{{ appeal.student_name || appeal.student || '—' }}</td>
-              <td class="px-4 py-3 text-slate-500 text-xs">{{ appeal.indicator_name || '整份提交' }}</td>
+              <td class="px-4 py-3 text-slate-700">{{ appeal.title || appeal.submission_detail?.project_name || '—' }}</td>
+              <td v-if="isReviewer" class="px-4 py-3 text-slate-700">{{ appeal.user_name || appeal.student_name || '—' }}</td>
+              <td class="px-4 py-3 text-slate-500 text-xs">{{ appeal.title ? '独立申诉' : (appeal.indicator_name || '整份提交') }}</td>
               <td class="max-w-xs px-4 py-3 text-slate-700">
                 <span class="block truncate" :title="appeal.reason">{{ appeal.reason || '—' }}</span>
               </td>
@@ -237,6 +247,52 @@
         </div>
       </div>
     </div>
+
+    <!-- 独立申诉弹窗 -->
+    <div
+      v-if="newAppealModal.show"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+      @click.self="newAppealModal.show = false"
+    >
+      <div class="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
+        <h3 class="mb-3 text-base font-semibold text-slate-800">发起独立申诉</h3>
+        <label class="mb-2 block text-sm text-slate-700">
+          申诉主题 <span class="text-red-500">*</span>
+          <input
+            v-model="newAppealModal.title"
+            type="text"
+            class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
+            placeholder="请填写申诉主题"
+          />
+        </label>
+        <label class="mb-2 block text-sm text-slate-700">
+          申诉内容 <span class="text-red-500">*</span>
+          <textarea
+            v-model="newAppealModal.reason"
+            rows="4"
+            class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-slate-800 focus:border-brand-500 focus:outline-none"
+            placeholder="请详细描述你的申诉内容..."
+          />
+        </label>
+        <div class="mb-2">
+          <label class="block text-xs text-slate-500">可选：上传附件（可多选）</label>
+          <input type="file" multiple class="mt-1 text-xs" @change="onNewAppealFilesChange" />
+          <p v-if="newAppealModal.files?.length" class="mt-1 text-xs text-slate-500">已选择 {{ newAppealModal.files.length }} 个文件</p>
+        </div>
+        <p v-if="newAppealModal.error" class="mb-2 text-xs text-red-600">{{ newAppealModal.error }}</p>
+        <div class="flex justify-end gap-2">
+          <button type="button" class="rounded border border-slate-300 px-4 py-1.5 text-sm text-slate-600 hover:bg-slate-50" @click="newAppealModal.show = false">取消</button>
+          <button
+            type="button"
+            class="rounded bg-brand-500 px-4 py-1.5 text-sm text-white hover:bg-brand-600 disabled:opacity-50"
+            :disabled="newAppealModal.loading"
+            @click="submitNewAppeal"
+          >
+            {{ newAppealModal.loading ? '提交中…' : '提交申诉' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -250,7 +306,7 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useHighlightStore } from '@/stores/highlight'
 import { useRoleMetaStore } from '@/stores/roles'
-import { getAppeals, updateAppealReason, deleteAppeal } from '@/api/appeals'
+import { getAppeals, updateAppealReason, deleteAppeal, createIndependentAppeal } from '@/api/appeals'
 import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import { formatDateTime } from '@/utils/format'
 import { getAppealStatusClass, getAppealStatusLabel } from '@/utils/submissionStatus'
@@ -423,6 +479,54 @@ function goToAppealDetail(appeal) {
  */
 function clearHighlight() {
   if (lastHighlightId.value !== null) lastHighlightId.value = null
+}
+
+const newAppealModal = reactive({
+  show: false,
+  title: '',
+  reason: '',
+  files: [],
+  loading: false,
+  error: '',
+})
+
+function openNewAppealModal() {
+  newAppealModal.show = true
+  newAppealModal.title = ''
+  newAppealModal.reason = ''
+  newAppealModal.files = []
+  newAppealModal.loading = false
+  newAppealModal.error = ''
+}
+
+function onNewAppealFilesChange(e) {
+  newAppealModal.files = Array.from(e.target?.files || [])
+}
+
+async function submitNewAppeal() {
+  if (!newAppealModal.title.trim()) {
+    newAppealModal.error = '请填写申诉主题'
+    return
+  }
+  if (!newAppealModal.reason.trim()) {
+    newAppealModal.error = '请填写申诉内容'
+    return
+  }
+  newAppealModal.loading = true
+  newAppealModal.error = ''
+  try {
+    await createIndependentAppeal(
+      newAppealModal.title.trim(),
+      newAppealModal.reason.trim(),
+      newAppealModal.files,
+    )
+    newAppealModal.show = false
+    loadAppeals()
+  } catch (e) {
+    newAppealModal.error = e.response?.data?.detail ?? '提交申诉失败'
+  } finally {
+    newAppealModal.loading = false
+  }
 }
 
 useRealtimeRefresh('appeal', loadAppeals)

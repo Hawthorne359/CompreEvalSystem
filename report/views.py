@@ -19,20 +19,30 @@ from users.permissions import user_level_at_least
 from scoring.models import ScoreRecord, ArbitrationRecord, ImportedScoreDetail
 from scoring.services import get_indicator_final_score
 from scoring.views import _attach_logical_round_fields
-from .models import ReportExportTemplate, ReportExportMapping
-from .serializers import ReportExportTemplateSerializer, ReportExportMappingSerializer
+from .models import ReportExportTemplate, ReportExportMapping, ReportExportFieldPreference
+from .serializers import (
+    ReportExportTemplateSerializer,
+    ReportExportMappingSerializer,
+    ReportExportFieldPreferenceSerializer,
+)
 from .services import (
     build_download_response,
     build_export_payload,
     FIELD_VIEW_MODE_ADVANCED_ALL,
     FIELD_VIEW_MODE_TEMPLATE_COMMON,
     get_project_export_catalog,
+    normalize_group_by,
+    normalize_group_file_mode,
+    render_excel_zip_by_group,
     render_excel,
     render_pdf,
+    render_pdf_zip_by_group,
     render_pdf_zip,
     render_word,
+    render_word_zip_by_group,
     render_word_zip,
     resolve_report_queryset,
+    split_rows_by_group,
     validate_export_mapping_config,
 )
 
@@ -97,6 +107,22 @@ def _request_filters(request):
     }
 
 
+def _allowed_group_by_values(user):
+    """
+    分组维度按角色层级降权：
+    - 超级管理员(level>=5): class / major / department
+    - 院系主任(level>=3): class / major
+    - 评审老师(level>=2): class
+    """
+    if user_level_at_least(user, 5):
+        return {'class', 'major', 'department'}
+    if user_level_at_least(user, 3):
+        return {'class', 'major'}
+    if user_level_at_least(user, 2):
+        return {'class'}
+    return set()
+
+
 def _can_access_template(user, template):
     if template.owner_id == user.id:
         return True
@@ -144,7 +170,7 @@ class ReportProjectRankingAPIView(APIView):
         if not user_level_at_least(request.user, 2):
             return Response({'detail': '无权限查看排名'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            project = EvalProject.objects.get(pk=pk)
+            project = EvalProject.objects.prefetch_related('indicators').get(pk=pk)
         except EvalProject.DoesNotExist:
             return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
         page = int(request.query_params.get('page', 1))
@@ -152,9 +178,33 @@ class ReportProjectRankingAPIView(APIView):
         qs = resolve_report_queryset(project, request.user, filters=_request_filters(request))
         total = qs.count()
         start = (page - 1) * page_size
-        items = qs[start:start + page_size]
+        items = list(qs.select_related('user__class_obj')[start:start + page_size])
+
+        # 获取项目根节点指标（用于列头展示）
+        all_indicators = list(project.indicators.order_by('order', 'id'))
+        # 优先展示一级（根节点）指标，若无层级则展示全部指标
+        root_indicators = [ind for ind in all_indicators if ind.parent_id is None]
+        if root_indicators:
+            display_indicators = root_indicators
+        else:
+            display_indicators = all_indicators
+
+        indicators_meta = [
+            {'id': ind.id, 'name': ind.name, 'max_score': float(ind.max_score) if ind.max_score is not None else None}
+            for ind in display_indicators
+        ]
+
         results = []
         for i, sub in enumerate(items, start=start + 1):
+            class_obj = getattr(sub.user, 'class_obj', None)
+            score_detail = sub.score_detail or {}
+            indicator_scores = {}
+            for ind in display_indicators:
+                entry = score_detail.get(str(ind.id))
+                if entry and entry.get('score') is not None:
+                    indicator_scores[str(ind.id)] = float(entry['score'])
+                else:
+                    indicator_scores[str(ind.id)] = None
             results.append({
                 'rank': i,
                 'submission_id': sub.id,
@@ -162,9 +212,17 @@ class ReportProjectRankingAPIView(APIView):
                 'student_no': getattr(sub.user, 'student_no', '') or sub.user.username,
                 'username': sub.user.username,
                 'real_name': sub.user.get_full_name() or sub.user.username,
+                'class_name': class_obj.name if class_obj else '—',
                 'final_score': float(sub.final_score) if sub.final_score is not None else None,
+                'indicator_scores': indicator_scores,
             })
-        return Response({'total': total, 'page': page, 'page_size': page_size, 'results': results})
+        return Response({
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'indicators': indicators_meta,
+            'results': results,
+        })
 
 
 class ReportProjectExportAPIView(APIView):
@@ -183,7 +241,19 @@ class ReportProjectExportAPIView(APIView):
         if fmt not in ('xlsx', 'pdf', 'word'):
             return Response({'detail': 'format 须为 xlsx / pdf / word'}, status=status.HTTP_400_BAD_REQUEST)
         multi_file = request.query_params.get('multi_file', 'false').lower() == 'true'
-        group_by = request.query_params.get('group_by', '').strip().lower()  # '' or 'class'
+        group_by = normalize_group_by(request.query_params.get('group_by', ''))
+        allowed_group_by = _allowed_group_by_values(request.user)
+        if group_by and group_by not in allowed_group_by:
+            return Response(
+                {'detail': f'当前角色不支持按 {group_by} 分组导出'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        group_file_mode = normalize_group_file_mode(
+            request.query_params.get('group_file_mode', ''),
+            multi_file=multi_file,
+        )
+        if group_file_mode == 'per_group_file' and not group_by:
+            return Response({'detail': '按分组导出时必须选择 group_by（class/major/department）'}, status=status.HTTP_400_BAD_REQUEST)
         zip_filename_pattern = request.query_params.get('zip_filename_pattern', '').strip() or None
         mapping_id = _to_int(request.query_params.get('mapping_id'))
         template_id = _to_int(request.query_params.get('template_id'))
@@ -226,12 +296,19 @@ class ReportProjectExportAPIView(APIView):
             )
         if template and not _can_access_template(request.user, template):
             return Response({'detail': '无权限使用该模板'}, status=status.HTTP_403_FORBIDDEN)
-        rows = build_export_payload(project, request.user, filters=_request_filters(request))
         cfg = (mapping.config if mapping else {}) or {}
         try:
             cfg = validate_export_mapping_config(cfg, output_format=fmt)
         except ValueError as exc:
             return Response({'detail': f'映射配置不合法：{str(exc)}'}, status=status.HTTP_400_BAD_REQUEST)
+        filters = _request_filters(request)
+        rows = build_export_payload(
+            project,
+            request.user,
+            filters=filters,
+            mapping_config=cfg,
+            group_by=group_by,
+        )
         template_path = template.file.path if (template and template.file) else None
         if fmt == 'xlsx' and template and template.template_type != 'excel':
             return Response({'detail': 'Excel 导出仅可使用 Excel 模板'}, status=status.HTTP_400_BAD_REQUEST)
@@ -245,20 +322,40 @@ class ReportProjectExportAPIView(APIView):
                 )
         try:
             if fmt == 'xlsx':
-                payload = render_excel(rows, mapping_config=cfg, template_path=template_path)
-                resp = build_download_response(
-                    payload,
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    f'成绩报表_{project.name}.xlsx',
-                )
-            elif fmt == 'word' and multi_file:
+                if group_file_mode == 'per_group_file' and group_by:
+                    payload = render_excel_zip_by_group(
+                        rows,
+                        mapping_config=cfg,
+                        template_path=template_path,
+                        group_by=group_by,
+                    )
+                    resp = build_download_response(
+                        payload,
+                        'application/zip',
+                        f'成绩报表_{project.name}_按{group_by}.zip',
+                    )
+                else:
+                    payload = render_excel(rows, mapping_config=cfg, template_path=template_path)
+                    resp = build_download_response(
+                        payload,
+                        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        f'成绩报表_{project.name}.xlsx',
+                    )
+            elif fmt == 'word' and group_file_mode == 'per_student_file':
                 payload = render_word_zip(rows, mapping_config=cfg, template_path=template_path,
                                           group_by=group_by, zip_filename_pattern=zip_filename_pattern)
-                suffix = '_按班级' if group_by == 'class' else '_逐人'
+                suffix = f'_按{group_by}' if group_by else '_逐人'
                 resp = build_download_response(
                     payload,
                     'application/zip',
                     f'成绩报表_{project.name}{suffix}.zip',
+                )
+            elif fmt == 'word' and group_file_mode == 'per_group_file' and group_by:
+                payload = render_word_zip_by_group(rows, mapping_config=cfg, template_path=template_path, group_by=group_by)
+                resp = build_download_response(
+                    payload,
+                    'application/zip',
+                    f'成绩报表_{project.name}_按{group_by}.zip',
                 )
             elif fmt == 'word':
                 payload = render_word(rows, mapping_config=cfg, template_path=template_path)
@@ -267,14 +364,21 @@ class ReportProjectExportAPIView(APIView):
                     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                     f'成绩报表_{project.name}.docx',
                 )
-            elif fmt == 'pdf' and multi_file:
+            elif fmt == 'pdf' and group_file_mode == 'per_student_file':
                 payload = render_pdf_zip(rows, mapping_config=cfg, template_path=template_path,
                                          group_by=group_by, zip_filename_pattern=zip_filename_pattern)
-                suffix = '_按班级' if group_by == 'class' else '_逐人'
+                suffix = f'_按{group_by}' if group_by else '_逐人'
                 resp = build_download_response(
                     payload,
                     'application/zip',
                     f'成绩报表_{project.name}{suffix}.zip',
+                )
+            elif fmt == 'pdf' and group_file_mode == 'per_group_file' and group_by:
+                payload = render_pdf_zip_by_group(rows, mapping_config=cfg, template_path=template_path, group_by=group_by)
+                resp = build_download_response(
+                    payload,
+                    'application/zip',
+                    f'成绩报表_{project.name}_按{group_by}.zip',
                 )
             else:
                 payload = render_pdf(rows, mapping_config=cfg, template_path=template_path)
@@ -283,6 +387,13 @@ class ReportProjectExportAPIView(APIView):
             return Response({'detail': str(exc)}, status=status.HTTP_501_NOT_IMPLEMENTED)
         except Exception as exc:
             return Response({'detail': f'导出失败：{str(exc)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        group_count = len(split_rows_by_group(rows, group_by)) if group_by else 1
+        if group_file_mode == 'per_student_file':
+            file_count = len(rows)
+        elif group_file_mode == 'per_group_file':
+            file_count = group_count
+        else:
+            file_count = 1
         log_action(
             user=request.user,
             action='report_export',
@@ -296,6 +407,11 @@ class ReportProjectExportAPIView(APIView):
                 'mapping_id': mapping.id if mapping else None,
                 'template_id': template.id if template else None,
                 'rows': len(rows),
+                'group_by': group_by or 'none',
+                'group_file_mode': group_file_mode,
+                'group_count': group_count,
+                'file_count': file_count,
+                'metrics_version': 2,
             },
             request=request,
         )
@@ -332,7 +448,16 @@ class ReportExportFieldOptionsAPIView(APIView):
         view_mode = request.query_params.get('view_mode', FIELD_VIEW_MODE_TEMPLATE_COMMON)
         if view_mode not in (FIELD_VIEW_MODE_TEMPLATE_COMMON, FIELD_VIEW_MODE_ADVANCED_ALL):
             view_mode = FIELD_VIEW_MODE_TEMPLATE_COMMON
-        catalog = get_project_export_catalog(project, view_mode=view_mode)
+        pref, _ = ReportExportFieldPreference.objects.get_or_create(
+            user=request.user,
+            project=project,
+            defaults={'common_field_keys': []},
+        )
+        catalog = get_project_export_catalog(
+            project,
+            view_mode=view_mode,
+            user_common_keys=pref.common_field_keys or [],
+        )
         return Response({
             'project_id': project.id,
             'project_name': project.name,
@@ -344,7 +469,82 @@ class ReportExportFieldOptionsAPIView(APIView):
             'all_fields': catalog.get('all_fields', catalog.get('fields', [])),
             'field_tree': catalog.get('field_tree', []),
             'presets': catalog.get('presets', []),
+            'user_common_keys': catalog.get('user_common_keys', []),
         })
+
+
+class ReportExportFieldPreferenceAPIView(APIView):
+    """GET/PATCH /api/v1/report/project/<id>/export/common-fields/ 用户常用字段偏好。"""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
+
+    def _get_project(self, pk):
+        return EvalProject.objects.get(pk=pk)
+
+    def get(self, request, pk):
+        if not user_level_at_least(request.user, 2):
+            return Response({'detail': '无权限查看常用字段'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            project = self._get_project(pk)
+        except EvalProject.DoesNotExist:
+            return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
+        pref, _ = ReportExportFieldPreference.objects.get_or_create(
+            user=request.user,
+            project=project,
+            defaults={'common_field_keys': []},
+        )
+        return Response(ReportExportFieldPreferenceSerializer(pref).data)
+
+    def patch(self, request, pk):
+        if not user_level_at_least(request.user, 2):
+            return Response({'detail': '无权限编辑常用字段'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            project = self._get_project(pk)
+        except EvalProject.DoesNotExist:
+            return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
+        pref, _ = ReportExportFieldPreference.objects.get_or_create(
+            user=request.user,
+            project=project,
+            defaults={'common_field_keys': []},
+        )
+        current = list(pref.common_field_keys or [])
+        payload = request.data or {}
+        full_replace = payload.get('common_field_keys', None)
+        if full_replace is not None:
+            serializer = ReportExportFieldPreferenceSerializer(
+                pref,
+                data={'common_field_keys': full_replace},
+                partial=True,
+            )
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(ReportExportFieldPreferenceSerializer(pref).data)
+
+        add_keys = payload.get('add_keys', []) or []
+        remove_keys = payload.get('remove_keys', []) or []
+        merged = []
+        seen = set()
+        for item in current:
+            key = str(item or '').strip()
+            if key and key not in seen:
+                seen.add(key)
+                merged.append(key)
+        for item in add_keys:
+            key = str(item or '').strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(key)
+        remove_set = set(str(item or '').strip() for item in remove_keys if str(item or '').strip())
+        merged = [k for k in merged if k not in remove_set]
+        serializer = ReportExportFieldPreferenceSerializer(
+            pref,
+            data={'common_field_keys': merged},
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(ReportExportFieldPreferenceSerializer(pref).data)
 
 
 class ReportExportTemplateListCreateAPIView(APIView):
@@ -497,6 +697,162 @@ class ReportExportMappingDetailAPIView(APIView):
             return Response({'detail': '无权限删除映射'}, status=status.HTTP_403_FORBIDDEN)
         obj.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ReportStudentRankingAPIView(APIView):
+    """
+    GET /api/v1/report/student/submissions/<id>/ranking/
+    学生端排名：根据项目的 report_visibility_config 返回该学生在班级/专业的排名。
+    """
+    permission_classes = [IsAuthenticated]
+
+    VISIBILITY_DEFAULTS = {
+        'ranking_enabled': False,
+        'ranking_scope': 'class',
+        'show_peer_identity': False,
+        'show_total_score': True,
+        'show_indicator_breakdown': False,
+        'show_my_rank_in_class': True,
+        'show_my_rank_in_major': False,
+    }
+
+    def _get_config(self, project):
+        raw = project.report_visibility_config or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        cfg = {}
+        for k, default in self.VISIBILITY_DEFAULTS.items():
+            val = raw.get(k, default)
+            if k == 'ranking_scope':
+                cfg[k] = str(val) if val in ('class', 'major') else 'class'
+            else:
+                cfg[k] = bool(val)
+        return cfg
+
+    def get(self, request, pk):
+        try:
+            submission = StudentSubmission.objects.select_related('project', 'user', 'user__class_obj', 'user__class_obj__major').get(pk=pk)
+        except StudentSubmission.DoesNotExist:
+            return Response({'detail': '提交不存在'}, status=status.HTTP_404_NOT_FOUND)
+        if submission.user_id != request.user.id:
+            return Response({'detail': '无权限查看该排名'}, status=status.HTTP_403_FORBIDDEN)
+
+        project = submission.project
+        cfg = self._get_config(project)
+
+        if not cfg['ranking_enabled']:
+            return Response({
+                'ranking_enabled': False,
+                'config': cfg,
+                'my_class_rank': None,
+                'my_major_rank': None,
+                'peers': [],
+            })
+
+        user = submission.user
+        student_class = getattr(user, 'class_obj', None)
+        class_id = student_class.id if student_class else None
+        major_obj = getattr(student_class, 'major', None) if student_class else None
+        major_id = major_obj.id if major_obj else None
+
+        scope = cfg['ranking_scope']
+
+        if scope == 'major' and major_id:
+            from org.models import Class as ClassModel
+            scope_class_ids = list(ClassModel.objects.filter(major_id=major_id).values_list('id', flat=True))
+            scope_qs = StudentSubmission.objects.filter(
+                project=project, user__class_obj_id__in=scope_class_ids,
+            ).exclude(status='draft').select_related('user', 'user__class_obj')
+        elif class_id:
+            scope_qs = StudentSubmission.objects.filter(
+                project=project, user__class_obj_id=class_id,
+            ).exclude(status='draft').select_related('user', 'user__class_obj')
+        else:
+            scope_qs = StudentSubmission.objects.filter(
+                project=project, user=user,
+            ).exclude(status='draft').select_related('user', 'user__class_obj')
+
+        scope_list = list(scope_qs.order_by('-final_score', 'user__student_no'))
+
+        indicators = _report_leaf_indicators(project) if cfg['show_indicator_breakdown'] else []
+        indicator_ids = [ind.id for ind in indicators]
+
+        indicator_scores_map = {}
+        if indicator_ids:
+            from scoring.services import get_indicator_final_score
+            for sub in scope_list:
+                scores = {}
+                for ind in indicators:
+                    fs = get_indicator_final_score(sub, ind)
+                    scores[ind.id] = float(fs) if fs is not None else None
+                indicator_scores_map[sub.id] = scores
+
+        my_rank_in_scope = None
+        for i, sub in enumerate(scope_list, 1):
+            if sub.id == submission.id:
+                my_rank_in_scope = i
+                break
+
+        my_class_rank = None
+        my_major_rank = None
+        if cfg['show_my_rank_in_class'] and class_id:
+            class_subs = [s for s in scope_list if getattr(s.user, 'class_obj_id', None) == class_id]
+            if scope == 'major':
+                class_subs.sort(key=lambda s: (-(float(s.final_score) if s.final_score is not None else -999999)))
+            for i, s in enumerate(class_subs, 1):
+                if s.id == submission.id:
+                    my_class_rank = i
+                    break
+        if cfg['show_my_rank_in_major'] and major_id:
+            if scope == 'major':
+                my_major_rank = my_rank_in_scope
+            else:
+                from org.models import Class as ClassModel
+                major_class_ids = list(ClassModel.objects.filter(major_id=major_id).values_list('id', flat=True))
+                major_subs = list(
+                    StudentSubmission.objects.filter(
+                        project=project, user__class_obj_id__in=major_class_ids,
+                    ).exclude(status='draft').order_by('-final_score', 'user__student_no')
+                )
+                for i, s in enumerate(major_subs, 1):
+                    if s.id == submission.id:
+                        my_major_rank = i
+                        break
+
+        peers = []
+        for rank, sub in enumerate(scope_list, 1):
+            entry = {'rank': rank, 'is_self': sub.id == submission.id}
+            if cfg['show_peer_identity'] or sub.id == submission.id:
+                entry['student_no'] = getattr(sub.user, 'student_no', '') or sub.user.username
+                entry['real_name'] = sub.user.get_full_name() or sub.user.username
+            else:
+                entry['student_no'] = '***'
+                entry['real_name'] = '***'
+            entry['class_name'] = sub.user.class_obj.name if getattr(sub.user, 'class_obj', None) else '—'
+            if cfg['show_total_score'] or sub.id == submission.id:
+                entry['final_score'] = float(sub.final_score) if sub.final_score is not None else None
+            else:
+                entry['final_score'] = None
+            if cfg['show_indicator_breakdown'] and indicator_ids:
+                entry['indicator_scores'] = indicator_scores_map.get(sub.id, {})
+            peers.append(entry)
+
+        indicator_headers = []
+        if cfg['show_indicator_breakdown']:
+            for ind in indicators:
+                indicator_headers.append({'id': ind.id, 'name': ind.name})
+
+        return Response({
+            'ranking_enabled': True,
+            'config': cfg,
+            'scope': scope,
+            'total_in_scope': len(scope_list),
+            'my_rank_in_scope': my_rank_in_scope,
+            'my_class_rank': my_class_rank,
+            'my_major_rank': my_major_rank,
+            'indicator_headers': indicator_headers,
+            'peers': peers,
+        })
 
 
 class ReportStudentSubmissionDetailAPIView(APIView):

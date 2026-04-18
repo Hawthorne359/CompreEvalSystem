@@ -1,5 +1,6 @@
 <template>
   <router-view />
+  <AppDialogHost />
   <!-- SSO 单点登录安全提醒弹窗：账号在其他设备登录时弹出 -->
   <Teleport to="body">
     <Transition name="sso-fade">
@@ -79,6 +80,7 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { sessionBus } from '@/utils/sessionBus'
 import { startEventStream, stopEventStream } from '@/composables/useEventStream'
+import AppDialogHost from '@/components/AppDialogHost.vue'
 
 const showSSODialog = ref(false)
 const ssoDeviceInfo = ref({ device: '', location: '', ip: '' })

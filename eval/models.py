@@ -57,6 +57,15 @@ class EvalProject(models.Model):
             '"student_field": "student_no", "comment": "批量导入", "module_import_modes": {"A1":"import"}}'
         ),
     )
+    report_visibility_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            '学生报表可见策略，由直属评审老师配置。'
+            '字段：ranking_enabled, ranking_scope(class/major), show_peer_identity, '
+            'show_total_score, show_indicator_breakdown, show_my_rank_in_class, show_my_rank_in_major'
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

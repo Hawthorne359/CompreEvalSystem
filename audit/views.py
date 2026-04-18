@@ -14,16 +14,28 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from users.role_resolver import ROLE_LEVEL_SUPERADMIN, get_role_display_name
+from users.role_resolver import (
+    ROLE_LEVEL_COUNSELOR,
+    ROLE_LEVEL_DIRECTOR,
+    ROLE_LEVEL_SUPERADMIN,
+    get_role_display_name,
+)
 
 from users.permissions import user_is_admin, user_is_super_admin
-from .models import OperationLog, LateSubmitRequest, LateSubmitRequestAttachment, LateSubmitChannel
+from .models import (
+    OperationLog,
+    LateSubmitRequest,
+    LateSubmitRequestAttachment,
+    LateSubmitChannel,
+    ImportPermissionRequest,
+)
 from .serializers import (
     OperationLogSerializer,
     OperationLogDetailSerializer,
     LateSubmitRequestSerializer,
     LateSubmitChannelSerializer,
     LatePendingSubmissionSerializer,
+    ImportPermissionRequestSerializer,
 )
 from .services import log_action, log_action_with_attachment
 
@@ -69,6 +81,39 @@ def _build_keyword_q(keyword):
         q |= Q(module__icontains=kw)
 
     return q
+
+
+def _user_max_role_level(user):
+    from django.db.models import Max
+    max_level = user.user_roles.aggregate(max_level=Max('role__level')).get('max_level')
+    return max_level if max_level is not None else -1
+
+
+def _resolve_import_scope_snapshot(user, max_level):
+    """记录申请时的权限范围快照，便于审计。"""
+    scope = {'max_level': max_level}
+    if max_level >= ROLE_LEVEL_DIRECTOR:
+        scope['department_id'] = user.department_id
+    if max_level >= ROLE_LEVEL_COUNSELOR:
+        class_ids = list(
+            user.user_roles.filter(scope_type='class', scope_id__isnull=False).values_list('scope_id', flat=True)
+        )
+        scope['class_ids'] = class_ids
+    return scope
+
+
+def _can_handle_import_request(handler, req):
+    """仅直系上级可审批：评审->主任，主任->超管。"""
+    current_level = handler.current_role.level if handler.current_role else -1
+    if req.requester_level == ROLE_LEVEL_COUNSELOR:
+        return (
+            current_level == ROLE_LEVEL_DIRECTOR
+            and handler.department_id
+            and handler.department_id == req.requester.department_id
+        )
+    if req.requester_level == ROLE_LEVEL_DIRECTOR:
+        return current_level >= ROLE_LEVEL_SUPERADMIN
+    return False
 
 
 class OperationLogPagination(PageNumberPagination):
@@ -508,6 +553,138 @@ class LateRequestHandleView(APIView):
             return Response(LateSubmitChannelSerializer(channel).data, status=status.HTTP_201_CREATED)
 
         return Response({'detail': 'action 参数错误，应为 approve 或 reject'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ImportPermissionRequestCreateView(APIView):
+    """
+    POST /api/v1/projects/<project_id>/import-requests/
+    下级发起导入权限申请（直系上级审批）。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, project_id):
+        from eval.models import EvalProject
+
+        try:
+            project = EvalProject.objects.get(pk=project_id)
+        except EvalProject.DoesNotExist:
+            return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        max_level = _user_max_role_level(request.user)
+        if max_level < ROLE_LEVEL_COUNSELOR:
+            return Response({'detail': '当前身份不可发起导入权限申请'}, status=status.HTTP_403_FORBIDDEN)
+        if max_level >= ROLE_LEVEL_SUPERADMIN:
+            return Response({'detail': f'{get_role_display_name(ROLE_LEVEL_SUPERADMIN)}无需发起导入申请'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if ImportPermissionRequest.objects.filter(
+            project=project,
+            requester=request.user,
+            status=ImportPermissionRequest.STATUS_PENDING,
+        ).exists():
+            return Response({'detail': '已存在待审批申请，请勿重复提交'}, status=status.HTTP_400_BAD_REQUEST)
+
+        reason = str(request.data.get('reason', '')).strip()
+        if not reason:
+            return Response({'detail': '申请理由不能为空'}, status=status.HTTP_400_BAD_REQUEST)
+
+        req = ImportPermissionRequest.objects.create(
+            project=project,
+            requester=request.user,
+            requester_level=ROLE_LEVEL_DIRECTOR if max_level >= ROLE_LEVEL_DIRECTOR else ROLE_LEVEL_COUNSELOR,
+            target_scope=_resolve_import_scope_snapshot(request.user, max_level),
+            reason=reason,
+        )
+        log_action(
+            user=request.user,
+            action='import_permission_request_create',
+            module=OperationLog.MODULE_SCORING,
+            level=OperationLog.LEVEL_WARNING,
+            target_type='import_permission_request',
+            target_id=req.id,
+            target_repr=f'{project.name} 导入权限申请',
+            reason=reason,
+            is_audit_event=True,
+            request=request,
+        )
+        return Response(
+            ImportPermissionRequestSerializer(req, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ImportPermissionRequestListView(generics.ListAPIView):
+    """
+    GET /api/v1/admin/import-requests/
+    审批人查看导入权限申请（直系上级待办）。
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = ImportPermissionRequestSerializer
+
+    def get_queryset(self):
+        current_level = self.request.user.current_role.level if self.request.user.current_role else -1
+        qs = ImportPermissionRequest.objects.select_related(
+            'project', 'requester', 'requester__current_role', 'handler'
+        ).order_by('-created_at')
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+        if current_level >= ROLE_LEVEL_SUPERADMIN:
+            return qs.filter(requester_level=ROLE_LEVEL_DIRECTOR)
+        if current_level == ROLE_LEVEL_DIRECTOR and self.request.user.department_id:
+            return qs.filter(
+                requester_level=ROLE_LEVEL_COUNSELOR,
+                requester__department_id=self.request.user.department_id,
+            )
+        return ImportPermissionRequest.objects.none()
+
+
+class ImportPermissionRequestHandleView(APIView):
+    """
+    POST /api/v1/admin/import-requests/<pk>/handle/
+    直系上级审批导入权限申请。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            req = ImportPermissionRequest.objects.select_related('project', 'requester').get(pk=pk)
+        except ImportPermissionRequest.DoesNotExist:
+            return Response({'detail': '申请不存在'}, status=status.HTTP_404_NOT_FOUND)
+        if req.status != ImportPermissionRequest.STATUS_PENDING:
+            return Response({'detail': '该申请已处理'}, status=status.HTTP_400_BAD_REQUEST)
+        if not _can_handle_import_request(request.user, req):
+            return Response({'detail': '仅直系上级可审批该申请'}, status=status.HTTP_403_FORBIDDEN)
+
+        action = request.data.get('action', '')
+        comment = str(request.data.get('comment', '')).strip()
+        if action not in {'approve', 'reject'}:
+            return Response({'detail': 'action 参数错误，应为 approve 或 reject'}, status=status.HTTP_400_BAD_REQUEST)
+        if action == 'reject' and not comment:
+            return Response({'detail': '请填写拒绝说明'}, status=status.HTTP_400_BAD_REQUEST)
+
+        req.handler = request.user
+        req.handle_comment = comment
+        if action == 'approve':
+            req.status = ImportPermissionRequest.STATUS_APPROVED
+            action_code = 'import_permission_request_approve'
+        else:
+            req.status = ImportPermissionRequest.STATUS_REJECTED
+            action_code = 'import_permission_request_reject'
+        req.save(update_fields=['status', 'handler', 'handle_comment', 'updated_at'])
+
+        log_action(
+            user=request.user,
+            action=action_code,
+            module=OperationLog.MODULE_SCORING,
+            level=OperationLog.LEVEL_WARNING,
+            target_type='import_permission_request',
+            target_id=req.id,
+            target_repr=f'{req.project.name} 导入权限申请',
+            reason=comment,
+            is_audit_event=True,
+            request=request,
+        )
+        return Response(ImportPermissionRequestSerializer(req, context={'request': request}).data)
 
 
 class LateChannelListCreateView(APIView):

@@ -185,6 +185,61 @@
         </div>
         <p v-else class="mt-2 text-xs text-slate-500">暂无提交级材料</p>
       </div>
+      <!-- 排名展示区 -->
+      <div v-if="rankingLoading" class="app-surface py-6 text-center text-slate-500">加载排名中…</div>
+      <div v-else-if="rankingError" class="rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{{ rankingError }}</div>
+      <div v-else-if="rankingData && rankingData.ranking_enabled" class="app-surface p-4 space-y-3">
+        <h3 class="text-sm font-medium text-slate-800">排名信息</h3>
+        <div class="flex flex-wrap gap-4 text-sm">
+          <div v-if="rankingData.my_class_rank != null" class="rounded-xl border border-blue-200 bg-blue-50 px-4 py-2">
+            <div class="text-xs text-blue-600">我在本班排名</div>
+            <div class="text-lg font-bold text-blue-700">第 {{ rankingData.my_class_rank }} 名</div>
+          </div>
+          <div v-if="rankingData.my_major_rank != null" class="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2">
+            <div class="text-xs text-indigo-600">我在本专业排名</div>
+            <div class="text-lg font-bold text-indigo-700">第 {{ rankingData.my_major_rank }} 名</div>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-2">
+            <div class="text-xs text-slate-500">{{ rankingScopeLabel }}总人数</div>
+            <div class="text-lg font-bold text-slate-700">{{ rankingData.total_in_scope }}</div>
+          </div>
+        </div>
+
+        <div v-if="rankingData.peers?.length" class="overflow-x-auto rounded border border-slate-200">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-slate-50 text-xs text-slate-600">
+              <tr>
+                <th class="px-3 py-2">名次</th>
+                <th class="px-3 py-2">学号</th>
+                <th class="px-3 py-2">姓名</th>
+                <th class="px-3 py-2">班级</th>
+                <th class="px-3 py-2">总分</th>
+                <th v-for="hdr in (rankingData.indicator_headers || [])" :key="hdr.id" class="px-3 py-2">{{ hdr.name }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="peer in rankingData.peers"
+                :key="peer.rank"
+                class="border-t border-slate-100"
+                :class="peer.is_self ? 'bg-brand-50 font-semibold' : ''"
+              >
+                <td class="px-3 py-2">{{ peer.rank }}</td>
+                <td class="px-3 py-2">{{ peer.student_no }}</td>
+                <td class="px-3 py-2">{{ peer.real_name }}</td>
+                <td class="px-3 py-2">{{ peer.class_name }}</td>
+                <td class="px-3 py-2">{{ peer.final_score != null ? peer.final_score : '—' }}</td>
+                <td v-for="hdr in (rankingData.indicator_headers || [])" :key="`${peer.rank}-${hdr.id}`" class="px-3 py-2">
+                  {{ peer.indicator_scores?.[hdr.id] != null ? peer.indicator_scores[hdr.id] : '—' }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div v-else-if="rankingData && !rankingData.ranking_enabled" class="app-surface px-4 py-3 text-sm text-slate-500">
+        排名功能暂未开放，如有疑问请联系评审老师。
+      </div>
     </template>
 
     <div v-if="appealModal.show" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
@@ -228,9 +283,10 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
-import { getStudentSubmissionReportDetail } from '@/api/report'
+import { getStudentSubmissionReportDetail, getStudentSubmissionRanking } from '@/api/report'
 import { createIndicatorAppealWithFiles } from '@/api/appeals'
 import { formatDateTime } from '@/utils/format'
+import { openConfirm } from '@/utils/dialog'
 
 const route = useRoute()
 const router = useRouter()
@@ -270,6 +326,29 @@ const currentTimeline = computed(() => {
     return ta - tb
   })
   return filtered
+})
+
+const rankingData = ref(null)
+const rankingLoading = ref(false)
+const rankingError = ref('')
+
+async function loadRanking() {
+  if (!isStudent.value) return
+  rankingLoading.value = true
+  rankingError.value = ''
+  try {
+    rankingData.value = await getStudentSubmissionRanking(Number(route.params.id))
+  } catch (e) {
+    rankingError.value = e.response?.data?.detail ?? '加载排名失败'
+    rankingData.value = null
+  } finally {
+    rankingLoading.value = false
+  }
+}
+
+const rankingScopeLabel = computed(() => {
+  if (!rankingData.value) return ''
+  return rankingData.value.scope === 'major' ? '本专业' : '本班'
 })
 
 const appealModal = ref({
@@ -401,8 +480,13 @@ async function submitModuleAppeal() {
       modal.files,
     )
     modal.show = false
-    const shouldGotoAppeals = window.confirm('申诉已提交，是否跳转到申诉列表查看进度？')
-    if (shouldGotoAppeals) router.push({ name: 'Appeals' })
+    const { confirmed } = await openConfirm({
+      title: '申诉已提交',
+      message: '是否跳转到申诉列表查看进度？',
+      confirmText: '立即跳转',
+      cancelText: '稍后再看',
+    })
+    if (confirmed) router.push({ name: 'Appeals' })
   } catch (e) {
     modal.error = e.response?.data?.detail ?? '提交申诉失败'
   } finally {
@@ -412,5 +496,6 @@ async function submitModuleAppeal() {
 
 onMounted(() => {
   loadDetail()
+  loadRanking()
 })
 </script>

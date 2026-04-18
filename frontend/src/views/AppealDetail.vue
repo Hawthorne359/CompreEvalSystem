@@ -26,7 +26,11 @@
               </span>
             </dd>
           </div>
-          <div>
+          <div v-if="appeal.title">
+            <dt class="text-slate-500">申诉主题</dt>
+            <dd class="font-medium text-slate-800">{{ appeal.title }}</dd>
+          </div>
+          <div v-if="appeal.submission">
             <dt class="text-slate-500">关联提交</dt>
             <dd>
               <router-link :to="`/submissions/${appeal.submission}`" class="app-link">
@@ -34,13 +38,17 @@
               </router-link>
             </dd>
           </div>
+          <div v-else>
+            <dt class="text-slate-500">类型</dt>
+            <dd class="text-slate-600">独立申诉</dd>
+          </div>
           <div v-if="appeal.indicator_name">
             <dt class="text-slate-500">申诉指标</dt>
             <dd class="font-medium text-slate-800">{{ appeal.indicator_name }}</dd>
           </div>
           <div>
             <dt class="text-slate-500">申诉人</dt>
-            <dd class="text-slate-800">{{ appeal.submission_detail?.student_name || '—' }}</dd>
+            <dd class="text-slate-800">{{ appeal.user_name || appeal.submission_detail?.student_name || '—' }}</dd>
           </div>
           <div>
             <dt class="text-slate-500">申诉时间</dt>
@@ -59,6 +67,32 @@
             <dd class="text-slate-800">{{ appeal.escalated_to_admin_name || adminLabel }}</dd>
           </div>
         </dl>
+      </div>
+
+      <!-- 处理进度 -->
+      <div v-if="appeal.progress_steps?.length" class="app-surface p-4 md:p-6">
+        <h3 class="mb-3 text-base font-medium text-slate-800">处理进度</h3>
+        <div v-if="appeal.current_handler_level_name && ['pending','escalated','escalated_to_admin'].includes(appeal.status)" class="mb-3 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+          当前正在由 <span class="font-semibold">{{ appeal.current_handler_level_name }}</span> 处理中
+        </div>
+        <ol class="relative ml-3 border-l-2 border-slate-200 space-y-4">
+          <li
+            v-for="(step, idx) in appeal.progress_steps"
+            :key="step.key"
+            class="ml-4"
+          >
+            <div class="absolute -left-2 mt-0.5 h-3.5 w-3.5 rounded-full border-2 border-white"
+              :class="step.done ? 'bg-brand-500' : step.active ? 'bg-amber-400 animate-pulse' : 'bg-slate-300'"
+            ></div>
+            <div class="text-sm" :class="step.done ? 'text-slate-800' : step.active ? 'text-amber-700 font-medium' : 'text-slate-400'">
+              {{ step.label }}
+              <span v-if="step.active" class="ml-1 text-xs text-amber-600">（处理中）</span>
+            </div>
+            <div v-if="step.handler" class="text-xs text-slate-500">处理人：{{ step.handler }}</div>
+            <div v-if="step.comment" class="mt-0.5 text-xs text-slate-600">{{ step.comment }}</div>
+            <div v-if="step.time" class="text-xs text-slate-400">{{ formatDateTime(step.time) }}</div>
+          </li>
+        </ol>
       </div>
 
       <!-- 申诉理由 -->
@@ -396,6 +430,7 @@ import {
 import { formatDateTime } from '@/utils/format'
 import { useRoleMetaStore } from '@/stores/roles'
 import { getAppealStatusClass, getAppealStatusLabel } from '@/utils/submissionStatus'
+import { openConfirm } from '@/utils/dialog'
 
 const route = useRoute()
 const router = useRouter()
@@ -486,7 +521,13 @@ const withdrawLoading = ref(false)
 const withdrawError = ref('')
 
 async function doWithdraw() {
-  if (!confirm('确定要撤回该申诉吗？撤回后无法恢复。')) return
+  const { confirmed } = await openConfirm({
+    title: '撤回申诉确认',
+    message: '确定要撤回该申诉吗？撤回后无法恢复。',
+    confirmText: '确认撤回',
+    danger: true,
+  })
+  if (!confirmed) return
   withdrawLoading.value = true
   withdrawError.value = ''
   try {

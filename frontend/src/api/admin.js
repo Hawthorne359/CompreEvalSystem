@@ -134,6 +134,26 @@ export function handleLateRequest(id, body) {
 }
 
 /**
+ * 管理员获取导入权限申请列表。
+ * @param {Object} [params]
+ * @param {string} [params.status] - pending / approved / rejected
+ * @returns {Promise<Array>}
+ */
+export function getImportPermissionRequests(params = {}) {
+  return api.get('/admin/import-requests/', { params }).then((res) => res.data)
+}
+
+/**
+ * 管理员审批导入权限申请。
+ * @param {number} id
+ * @param {{action:'approve'|'reject', comment?:string}} body
+ * @returns {Promise<Object>}
+ */
+export function handleImportPermissionRequest(id, body) {
+  return api.post(`/admin/import-requests/${id}/handle/`, body).then((res) => res.data)
+}
+
+/**
  * 待推送中心：获取扁平化待推送补交记录列表（不按通道分组）。
  * @param {Object} [params]
  * @param {string} [params.keyword] - 学生姓名/学号关键词

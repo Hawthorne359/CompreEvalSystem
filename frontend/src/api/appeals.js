@@ -66,6 +66,17 @@ export function createIndicatorAppealWithFiles(submissionId, indicatorId, reason
  * @param {Object} params - { status?: string, page?: number }
  * @returns {Promise<{ results: Array, count: number } | Array>}
  */
+export function createIndependentAppeal(title, reason, files = [], submissionId = null) {
+  const form = new FormData()
+  form.append('title', title)
+  form.append('reason', reason)
+  if (submissionId) form.append('submission_id', String(submissionId))
+  for (const file of files) form.append('files', file)
+  return api.post('/appeals/independent/', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  }).then((res) => res.data)
+}
+
 export function getAppeals(params = {}) {
   return api.get('/appeals/', { params }).then((res) => res.data)
 }

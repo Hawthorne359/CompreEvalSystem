@@ -24,10 +24,17 @@ FROM python:3.12-slim AS runner
 # 设置工作目录
 WORKDIR /app
 
-# 安装系统依赖（PyMySQL 不需要 mysql-client 编译，但 cryptography 需要）
+# 安装系统依赖：
+# - cryptography 编译依赖
+# - LibreOffice（用于 Word 模板转 PDF）
+# - 常用中文字体（避免 PDF 中文乱码/方块）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
+    libreoffice-core \
+    libreoffice-writer \
+    fonts-noto-cjk \
+    fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*
 
 # 先复制依赖文件，利用层缓存

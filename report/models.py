@@ -95,3 +95,29 @@ class ReportExportMapping(models.Model):
 
     def __str__(self):
         return f'{self.name}({self.output_format})'
+
+
+class ReportExportFieldPreference(models.Model):
+    """用户维度的导出字段偏好（常用字段集合）。"""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='report_export_field_preferences',
+    )
+    project = models.ForeignKey(
+        'eval.EvalProject',
+        on_delete=models.CASCADE,
+        related_name='report_export_field_preferences',
+    )
+    common_field_keys = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'report_export_field_preference'
+        ordering = ['-updated_at', '-id']
+        unique_together = [['user', 'project']]
+
+    def __str__(self):
+        return f'pref:{self.user_id}:{self.project_id}'

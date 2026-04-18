@@ -307,6 +307,7 @@ import { useRoleMetaStore } from '@/stores/roles'
 import PasswordConfirmDialog from '@/components/PasswordConfirmDialog.vue'
 import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import { formatDateTime } from '@/utils/format'
+import { openAlert, openConfirm } from '@/utils/dialog'
 
 const route = useRoute()
 const highlightStore = useHighlightStore()
@@ -358,7 +359,11 @@ async function doDeleteProject({ confirmToken, reason }) {
     pendingDeleteProject.value = null
     loadProjects()
   } catch (e) {
-    alert(e.response?.data?.detail ?? '删除失败，请重试')
+    await openAlert({
+      title: '删除失败',
+      message: e.response?.data?.detail ?? '删除失败，请重试',
+      danger: true,
+    })
   }
 }
 
@@ -409,9 +414,16 @@ async function doBatchDeleteProject({ confirmToken, reason }) {
     await batchDeleteProjects(selectedProjectIds.value, { confirm_token: confirmToken, reason })
     selectedProjectIds.value = []
     await loadProjects()
-    window.alert('批量删除测评项目成功')
+    await openAlert({
+      title: '操作成功',
+      message: '批量删除测评项目成功',
+    })
   } catch (e) {
-    window.alert(e.response?.data?.detail ?? '批量删除测评项目失败，请重试')
+    await openAlert({
+      title: '批量删除失败',
+      message: e.response?.data?.detail ?? '批量删除测评项目失败，请重试',
+      danger: true,
+    })
   }
 }
 
@@ -422,13 +434,25 @@ async function doBatchDeleteProject({ confirmToken, reason }) {
  */
 async function doBatchSetStatus(status, label) {
   if (selectedCount.value < 2) return
-  if (!window.confirm(`确定将选中的 ${selectedCount.value} 个项目${label}吗？`)) return
+  const { confirmed } = await openConfirm({
+    title: '批量操作确认',
+    message: `确定将选中的 ${selectedCount.value} 个项目${label}吗？`,
+    confirmText: '确认执行',
+  })
+  if (!confirmed) return
   try {
     await batchUpdateProjectsStatus(selectedProjectIds.value, status)
     await loadProjects()
-    window.alert(`批量${label}成功`)
+    await openAlert({
+      title: '操作成功',
+      message: `批量${label}成功`,
+    })
   } catch (e) {
-    window.alert(e.response?.data?.detail ?? `批量${label}失败`)
+    await openAlert({
+      title: '操作失败',
+      message: e.response?.data?.detail ?? `批量${label}失败`,
+      danger: true,
+    })
   }
 }
 

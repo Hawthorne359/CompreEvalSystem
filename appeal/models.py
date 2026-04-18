@@ -14,10 +14,27 @@ class Appeal(models.Model):
         ('escalated', '已上报院系主任'),
         ('escalated_to_admin', '已上报超级管理员'),
     ]
+    title = models.CharField(
+        max_length=200,
+        blank=True,
+        default='',
+        help_text='独立申诉主题；指标级/整份提交申诉可留空',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='filed_appeals',
+        help_text='申诉发起人；独立申诉必填，旧申诉通过 submission.user 推断',
+    )
     submission = models.ForeignKey(
         'submission.StudentSubmission',
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='appeals',
+        help_text='关联提交；独立申诉可为空',
     )
     indicator = models.ForeignKey(
         'eval.EvalIndicator',

@@ -174,6 +174,10 @@ def _build_submission_task_item(project, submission, access_ctx, arbitrated_subm
             submission_status,
             is_arbitrated=is_arbitrated,
         )
+        # 草稿状态且当前可提交时，展示为"待提交"更具指导性
+        if submission_status == 'draft' and access_ctx['can_submit']:
+            display_status = '待提交'
+            display_tone = 'warning'
         entry_label = display_status
     else:
         submission_status = None

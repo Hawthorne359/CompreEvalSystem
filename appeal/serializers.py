@@ -30,17 +30,23 @@ class AppealSerializer(serializers.ModelSerializer):
     indicator_name = serializers.SerializerMethodField()
     escalated_to_name = serializers.SerializerMethodField()
     escalated_to_admin_name = serializers.SerializerMethodField()
+    user_name = serializers.SerializerMethodField()
+    current_handler_level = serializers.SerializerMethodField()
+    current_handler_level_name = serializers.SerializerMethodField()
+    progress_steps = serializers.SerializerMethodField()
     attachments = AppealAttachmentSerializer(many=True, read_only=True)
 
     class Meta:
         model = Appeal
         fields = [
-            'id', 'submission', 'submission_detail',
+            'id', 'title', 'user', 'user_name',
+            'submission', 'submission_detail',
             'indicator', 'indicator_name',
             'reason', 'status', 'original_submission_status',
             'handler', 'handler_name', 'handle_comment',
             'is_escalated', 'escalated_to', 'escalated_to_name', 'escalate_comment',
             'escalated_to_admin', 'escalated_to_admin_name', 'admin_comment',
+            'current_handler_level', 'current_handler_level_name', 'progress_steps',
             'attachments',
             'created_at', 'updated_at',
         ]
@@ -50,8 +56,19 @@ class AppealSerializer(serializers.ModelSerializer):
                             'escalated_to_admin', 'admin_comment']
 
     def get_submission_detail(self, obj):
+        if obj.submission_id is None:
+            return None
         from submission.serializers import StudentSubmissionListSerializer
         return StudentSubmissionListSerializer(obj.submission).data
+
+    def get_user_name(self, obj):
+        if obj.user_id:
+            u = obj.user
+            return u.get_full_name() or u.username if u else None
+        if obj.submission_id and obj.submission:
+            u = obj.submission.user
+            return u.get_full_name() or u.username if u else None
+        return None
 
     def get_indicator_name(self, obj):
         if obj.indicator_id:
@@ -69,6 +86,58 @@ class AppealSerializer(serializers.ModelSerializer):
             u = obj.escalated_to_admin
             return u.get_full_name() or u.username if u else None
         return None
+
+    HANDLER_LEVEL_MAP = {
+        'pending': (2, '评审老师'),
+        'escalated': (3, '院系主任'),
+        'escalated_to_admin': (5, '超级管理员'),
+    }
+
+    def get_current_handler_level(self, obj):
+        entry = self.HANDLER_LEVEL_MAP.get(obj.status)
+        return entry[0] if entry else None
+
+    def get_current_handler_level_name(self, obj):
+        entry = self.HANDLER_LEVEL_MAP.get(obj.status)
+        return entry[1] if entry else None
+
+    def get_progress_steps(self, obj):
+        steps = [{'key': 'filed', 'label': '已发起', 'done': True, 'time': obj.created_at}]
+        if obj.handler_id or obj.status not in ('pending',):
+            steps.append({
+                'key': 'counselor',
+                'label': '评审老师处理',
+                'done': obj.handler_id is not None,
+                'handler': obj.handler.get_full_name() if obj.handler_id and obj.handler else None,
+                'comment': obj.handle_comment or None,
+                'active': obj.status == 'pending',
+            })
+        if obj.is_escalated or obj.status in ('escalated', 'escalated_to_admin', 'approved', 'rejected'):
+            if obj.escalated_to_id or obj.status in ('escalated',):
+                steps.append({
+                    'key': 'director',
+                    'label': '院系主任处理',
+                    'done': obj.status not in ('escalated',),
+                    'handler': obj.escalated_to.get_full_name() if obj.escalated_to_id and obj.escalated_to else None,
+                    'comment': obj.escalate_comment or None,
+                    'active': obj.status == 'escalated',
+                })
+        if obj.escalated_to_admin_id or obj.status == 'escalated_to_admin':
+            steps.append({
+                'key': 'admin',
+                'label': '超级管理员处理',
+                'done': obj.status not in ('escalated_to_admin',),
+                'handler': obj.escalated_to_admin.get_full_name() if obj.escalated_to_admin_id and obj.escalated_to_admin else None,
+                'comment': obj.admin_comment or None,
+                'active': obj.status == 'escalated_to_admin',
+            })
+        if obj.status in ('approved', 'rejected'):
+            steps.append({
+                'key': 'result',
+                'label': '已通过' if obj.status == 'approved' else '已驳回',
+                'done': True,
+            })
+        return steps
 
 
 class AppealCreateUpdateSerializer(serializers.ModelSerializer):

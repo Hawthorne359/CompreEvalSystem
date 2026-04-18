@@ -14,7 +14,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 
-from audit.models import OperationLog
+from audit.models import OperationLog, ImportPermissionRequest
 from audit.services import log_action
 from submission.models import StudentSubmission, SubmissionAnswer, Evidence
 from submission.serializers import StudentSubmissionSerializer
@@ -467,7 +467,89 @@ def _get_counselor_class_ids(user):
     )
 
 
-def _user_can_manage_project_import(user, project):
+def _resolve_director_department_id(user):
+    """解析主任导入范围院系。"""
+    if getattr(user, 'department_id', None):
+        return user.department_id
+    from users.models import UserRole as UserRoleModel
+    director_scope = (
+        UserRoleModel.objects
+        .filter(user=user, role__level=ROLE_LEVEL_DIRECTOR, scope_type='department', scope_id__isnull=False)
+        .order_by('id')
+        .values_list('scope_id', flat=True)
+        .first()
+    )
+    return director_scope
+
+
+def _resolve_import_actor_scope(user):
+    """
+    解析导入权限作用域：按用户最高角色等级决定导入边界。
+    """
+    current_level = user.current_role.level if user.current_role else -1
+    max_level = _user_max_role_level(user)
+    effective_level = -1
+    department_id = None
+    class_ids = set()
+
+    if max_level >= ROLE_LEVEL_SUPERADMIN:
+        effective_level = ROLE_LEVEL_SUPERADMIN
+    elif max_level >= ROLE_LEVEL_DIRECTOR:
+        effective_level = ROLE_LEVEL_DIRECTOR
+        department_id = _resolve_director_department_id(user)
+    elif max_level >= ROLE_LEVEL_COUNSELOR:
+        effective_level = ROLE_LEVEL_COUNSELOR
+        class_ids = _get_counselor_class_ids(user)
+
+    return {
+        'current_level': current_level,
+        'max_level': max_level,
+        'effective_level': effective_level,
+        'department_id': department_id,
+        'class_ids': class_ids,
+    }
+
+
+def _sanitize_import_policy(config):
+    """规范化导入策略配置。"""
+    cfg = config or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    mode = str(cfg.get('import_mode', 'subordinate_self')).strip()
+    if mode not in {'subordinate_self', 'upper_unified'}:
+        mode = 'subordinate_self'
+    requires_approval = bool(cfg.get('subordinate_requires_approval', True))
+    return {
+        'import_mode': mode,
+        'subordinate_requires_approval': requires_approval,
+    }
+
+
+def _is_import_blocked_by_policy(user, project, actor_scope):
+    """
+    返回 (is_blocked, detail)。
+    upper_unified 策略下：主任及以上可直接导入；评审老师需审批（若策略要求）。
+    """
+    policy = _sanitize_import_policy(getattr(project, 'import_config', {}) or {})
+    if policy['import_mode'] != 'upper_unified':
+        return False, ''
+
+    if actor_scope['effective_level'] >= ROLE_LEVEL_DIRECTOR:
+        return False, ''
+    if not policy['subordinate_requires_approval']:
+        return False, ''
+
+    approved = ImportPermissionRequest.objects.filter(
+        project=project,
+        requester=user,
+        status=ImportPermissionRequest.STATUS_APPROVED,
+    ).exists()
+    if approved:
+        return False, ''
+    return True, '当前项目已启用“上级统一导入”，您需向直系上级发起申请并获批后方可导入'
+
+
+def _user_can_manage_project_import(user, project, actor_scope=None):
     """
     成绩导入权限判断（项目级别入口校验）：
     - 超管（level>=5）：全局可导入
@@ -476,18 +558,20 @@ def _user_can_manage_project_import(user, project):
     - 评审老师（level==2）：其负责班级中有学生参与该项目即可进入，
       具体每行学生是否属于其负责班级在逐行处理时再判断。
     """
-    level = user.current_role.level if user.current_role else -1
+    scope = actor_scope or _resolve_import_actor_scope(user)
+    level = scope['effective_level']
     if level >= ROLE_LEVEL_SUPERADMIN:
         return True
     if level == ROLE_LEVEL_DIRECTOR:
-        if not user.department_id:
+        dept_id = scope['department_id']
+        if not dept_id:
             return False
         return StudentSubmission.objects.filter(
             project=project,
-            user__department_id=user.department_id,
+            user__department_id=dept_id,
         ).exists()
     if level == ROLE_LEVEL_COUNSELOR:
-        class_ids = _get_counselor_class_ids(user)
+        class_ids = scope['class_ids']
         if not class_ids:
             return False
         return StudentSubmission.objects.filter(
@@ -1588,8 +1672,24 @@ class ScoringImportAPIView(APIView):
             project = EvalProject.objects.get(pk=project_id)
         except EvalProject.DoesNotExist:
             return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
-        if not _user_can_manage_project_import(request.user, project):
+        actor_scope = _resolve_import_actor_scope(request.user)
+        if not _user_can_manage_project_import(request.user, project, actor_scope=actor_scope):
             return Response({'detail': '无权限导入该项目（仅可操作本院系/班级范围）'}, status=status.HTTP_403_FORBIDDEN)
+        blocked, policy_detail = _is_import_blocked_by_policy(request.user, project, actor_scope)
+        if blocked:
+            log_action(
+                user=request.user,
+                action='import_blocked_by_policy',
+                module=OperationLog.MODULE_SCORING,
+                level=OperationLog.LEVEL_WARNING,
+                target_type='eval_project',
+                target_id=project.id,
+                target_repr=project.name,
+                reason=policy_detail,
+                is_audit_event=True,
+                request=request,
+            )
+            return Response({'detail': policy_detail}, status=status.HTTP_403_FORBIDDEN)
 
         cfg = project.import_config or {}
         student_field = str(cfg.get('student_field', 'student_no')).strip() or 'student_no'
@@ -1653,10 +1753,11 @@ class ScoringImportAPIView(APIView):
 
             from django.contrib.auth import get_user_model
             UserModel = get_user_model()
-            operator_level = request.user.current_role.level if request.user.current_role else -1
+            operator_level = actor_scope['effective_level']
             is_director = operator_level == ROLE_LEVEL_DIRECTOR
             is_counselor = operator_level == ROLE_LEVEL_COUNSELOR
-            counselor_class_ids = _get_counselor_class_ids(request.user) if is_counselor else set()
+            counselor_class_ids = actor_scope['class_ids'] if is_counselor else set()
+            director_department_id = actor_scope['department_id'] if is_director else None
 
             for i, row in enumerate(data_rows):
                 row_num = i + 2
@@ -1681,7 +1782,7 @@ class ScoringImportAPIView(APIView):
                     continue
                 # 院系主任行级权限
                 if is_director:
-                    if not request.user.department_id or target_user.department_id != request.user.department_id:
+                    if not director_department_id or target_user.department_id != director_department_id:
                         dept_name = getattr(target_user.department, 'name', '未知院系') if target_user.department_id else '未知院系'
                         errors.append({
                             'row': row_num,
@@ -1753,7 +1854,9 @@ class ScoringImportAPIView(APIView):
                 'error_count': len(errors),
                 'excluded_rows_count': len(excluded_rows),
                 'used_preview_token': bool(preview_token),
-                'operator_level': request.user.current_role.level if request.user.current_role else -1,
+                'operator_level': actor_scope['effective_level'],
+                'operator_current_level': actor_scope['current_level'],
+                'operator_max_level': actor_scope['max_level'],
                 'project_id': project.id,
             },
             is_audit_event=True,
@@ -1789,8 +1892,24 @@ class ScoringImportPrecheckAPIView(APIView):
             project = EvalProject.objects.get(pk=project_id)
         except EvalProject.DoesNotExist:
             return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
-        if not _user_can_manage_project_import(request.user, project):
+        actor_scope = _resolve_import_actor_scope(request.user)
+        if not _user_can_manage_project_import(request.user, project, actor_scope=actor_scope):
             return Response({'detail': '无权限预检该项目（仅可操作本院系/班级范围）'}, status=status.HTTP_403_FORBIDDEN)
+        blocked, policy_detail = _is_import_blocked_by_policy(request.user, project, actor_scope)
+        if blocked:
+            log_action(
+                user=request.user,
+                action='import_blocked_by_policy',
+                module=OperationLog.MODULE_SCORING,
+                level=OperationLog.LEVEL_WARNING,
+                target_type='eval_project',
+                target_id=project.id,
+                target_repr=project.name,
+                reason=policy_detail,
+                is_audit_event=True,
+                request=request,
+            )
+            return Response({'detail': policy_detail}, status=status.HTTP_403_FORBIDDEN)
 
         cfg = project.import_config or {}
         student_field = str(cfg.get('student_field', 'student_no')).strip() or 'student_no'
@@ -1823,10 +1942,11 @@ class ScoringImportPrecheckAPIView(APIView):
 
             from django.contrib.auth import get_user_model
             UserModel = get_user_model()
-            operator_level = request.user.current_role.level if request.user.current_role else -1
+            operator_level = actor_scope['effective_level']
             is_director = operator_level == ROLE_LEVEL_DIRECTOR
             is_counselor = operator_level == ROLE_LEVEL_COUNSELOR
-            counselor_class_ids = _get_counselor_class_ids(request.user) if is_counselor else set()
+            counselor_class_ids = actor_scope['class_ids'] if is_counselor else set()
+            director_department_id = actor_scope['department_id'] if is_director else None
 
             for i, row in enumerate(data_rows):
                 if not row:
@@ -1851,7 +1971,7 @@ class ScoringImportPrecheckAPIView(APIView):
 
                 # 院系主任行级权限检查
                 if is_director:
-                    if not request.user.department_id or target_user.department_id != request.user.department_id:
+                    if not director_department_id or target_user.department_id != director_department_id:
                         dept_name = getattr(target_user.department, 'name', '未知院系') if target_user.department_id else '未知院系'
                         errors.append({
                             'row': row_num,
@@ -1939,8 +2059,12 @@ class ScoringImportTemplateAPIView(APIView):
             project = EvalProject.objects.prefetch_related('indicators').get(pk=project_id)
         except EvalProject.DoesNotExist:
             return Response({'detail': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
-        if not _user_can_manage_project_import(request.user, project):
+        actor_scope = _resolve_import_actor_scope(request.user)
+        if not _user_can_manage_project_import(request.user, project, actor_scope=actor_scope):
             return Response({'detail': '无权限下载该项目模板（仅可操作本院系/班级范围）'}, status=status.HTTP_403_FORBIDDEN)
+        blocked, policy_detail = _is_import_blocked_by_policy(request.user, project, actor_scope)
+        if blocked:
+            return Response({'detail': policy_detail}, status=status.HTTP_403_FORBIDDEN)
 
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment
@@ -1990,7 +2114,7 @@ class ScoringImportTemplateAPIView(APIView):
         ws_note.append(['', ''])
 
         # 根据操作者角色写入权限范围说明
-        operator_level = request.user.current_role.level if request.user.current_role else -1
+        operator_level = actor_scope['effective_level']
         if operator_level == ROLE_LEVEL_DIRECTOR:
             dept_name = request.user.department.name if request.user.department_id else '（未绑定院系）'
             ws_note.append(['操作者权限范围', f'{get_role_display_name(ROLE_LEVEL_DIRECTOR)} — 仅可导入院系"{dept_name}"内学生的成绩'])

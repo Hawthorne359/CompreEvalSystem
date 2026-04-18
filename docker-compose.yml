@@ -63,15 +63,14 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
+    networks:
+      - default
+      - leaplogic_net
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./media:/app/media:ro
       - frontend_dist:/app/frontend/dist:ro
       - staticfiles:/app/staticfiles:ro
-      - /certificate:/etc/nginx/ssl:ro
     depends_on:
       - backend
 
@@ -82,3 +81,7 @@ volumes:
     driver: local
   staticfiles:
     driver: local
+
+networks:
+  leaplogic_net:
+    external: true

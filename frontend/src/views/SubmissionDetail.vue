@@ -370,6 +370,7 @@ import AttachmentPreviewList from '@/components/AttachmentPreviewList.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { formatDateTime } from '@/utils/format'
 import { deriveSubmissionDisplayStatus } from '@/utils/submissionStatus'
+import { openConfirm } from '@/utils/dialog'
 
 const route = useRoute()
 const loading = ref(true)
@@ -482,9 +483,17 @@ function scrollNavToActive() {
   })
 }
 
-function switchQuestion(idx) {
+async function switchQuestion(idx) {
   if (idx < 0 || idx >= questionList.value.length) return
-  if (isDirty.value && !window.confirm('当前题目有未保存的修改，是否放弃并切换？')) return
+  if (isDirty.value) {
+    const { confirmed } = await openConfirm({
+      title: '未保存修改',
+      message: '当前题目有未保存的修改，是否放弃并切换？',
+      confirmText: '放弃并切换',
+      danger: true,
+    })
+    if (!confirmed) return
+  }
   currentQuestionIdx.value = idx
   questionError.value = ''
   uploadError.value = ''

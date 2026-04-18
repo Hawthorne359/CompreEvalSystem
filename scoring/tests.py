@@ -4,7 +4,11 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from scoring.services import submission_missing_required_leaf_indicators
-from scoring.views import _triggered_reason_by_actor_level
+from scoring.views import (
+    _triggered_reason_by_actor_level,
+    _resolve_import_actor_scope,
+    _sanitize_import_policy,
+)
 
 
 class SubmissionCompletenessTests(TestCase):
@@ -75,3 +79,36 @@ class ObjectionIntegrationHelperTests(TestCase):
         self.assertEqual(_triggered_reason_by_actor_level(2), 'counselor_objection')
         self.assertEqual(_triggered_reason_by_actor_level(3), 'director_objection')
         self.assertEqual(_triggered_reason_by_actor_level(5), 'admin_objection')
+
+
+class ImportScopeHelperTests(TestCase):
+    """导入权限作用域辅助函数测试。"""
+
+    def test_resolve_scope_prefers_max_role_level(self):
+        user = SimpleNamespace(current_role=SimpleNamespace(level=2))
+        with patch('scoring.views._user_max_role_level', return_value=5), patch(
+            'scoring.views._get_counselor_class_ids', return_value={1, 2}
+        ):
+            scope = _resolve_import_actor_scope(user)
+        self.assertEqual(scope['effective_level'], 5)
+        self.assertEqual(scope['current_level'], 2)
+        self.assertEqual(scope['max_level'], 5)
+
+    def test_resolve_scope_director_requires_department(self):
+        user = SimpleNamespace(current_role=SimpleNamespace(level=2), department_id=10)
+        with patch('scoring.views._user_max_role_level', return_value=3), patch(
+            'scoring.views._resolve_director_department_id', return_value=10
+        ):
+            scope = _resolve_import_actor_scope(user)
+        self.assertEqual(scope['effective_level'], 3)
+        self.assertEqual(scope['department_id'], 10)
+
+    def test_import_policy_default_and_invalid(self):
+        self.assertEqual(
+            _sanitize_import_policy({}),
+            {'import_mode': 'subordinate_self', 'subordinate_requires_approval': True},
+        )
+        self.assertEqual(
+            _sanitize_import_policy({'import_mode': 'bad', 'subordinate_requires_approval': 0}),
+            {'import_mode': 'subordinate_self', 'subordinate_requires_approval': False},
+        )

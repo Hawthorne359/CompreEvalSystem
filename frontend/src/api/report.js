@@ -77,6 +77,10 @@ export function getStudentSubmissionReportDetail(submissionId) {
   return api.get(`/report/student/submissions/${submissionId}/detail/`).then((res) => res.data)
 }
 
+export function getStudentSubmissionRanking(submissionId) {
+  return api.get(`/report/student/submissions/${submissionId}/ranking/`).then((res) => res.data)
+}
+
 /**
  * 某项目按班级等汇总（主任/管理员）
  * @param {number} projectId - 测评项目 ID
@@ -187,6 +191,30 @@ export function exportReport(projectId, format = 'xlsx', projectName = '', extra
 }
 
 /**
+ * 兼容式导出入口：
+ * - 统一格式取值（word/pdf/xlsx）
+ * - 仅携带 output_format（避免 DRF 将 format=word 误判为渲染器格式导致 404）
+ * @param {{
+ *  projectId:number|string,
+ *  format:string,
+ *  projectName?:string,
+ *  extraParams?:Object
+ * }} options
+ * @returns {Promise<void>}
+ */
+export function exportReportWithCompat(options) {
+  const projectId = options?.projectId
+  const projectName = options?.projectName || ''
+  const extraParams = options?.extraParams || {}
+  const normalized = String(options?.format || extraParams.output_format || extraParams.format || 'xlsx').toLowerCase()
+  const finalFormat = normalized === 'word' || normalized === 'pdf' ? normalized : 'xlsx'
+  return exportReport(projectId, finalFormat, projectName, {
+    ...extraParams,
+    output_format: finalFormat,
+  })
+}
+
+/**
  * 获取项目可映射字段。
  * @param {number} projectId
  * @param {Object} [params]
@@ -194,6 +222,28 @@ export function exportReport(projectId, format = 'xlsx', projectName = '', extra
  */
 export function getExportFields(projectId, params = {}) {
   return api.get(`/report/project/${projectId}/export/fields/`, { params }).then((res) => res.data)
+}
+
+/**
+ * 获取当前用户在项目下的常用字段偏好。
+ * @param {number} projectId
+ * @returns {Promise<Object>}
+ */
+export function getExportCommonFields(projectId) {
+  return api.get(`/report/project/${projectId}/export/common-fields/`).then((res) => res.data)
+}
+
+/**
+ * 更新当前用户在项目下的常用字段偏好。
+ * payload 支持：
+ * - { common_field_keys: string[] } 全量覆盖
+ * - { add_keys: string[], remove_keys: string[] } 增量更新
+ * @param {number} projectId
+ * @param {Object} payload
+ * @returns {Promise<Object>}
+ */
+export function updateExportCommonFields(projectId, payload) {
+  return api.patch(`/report/project/${projectId}/export/common-fields/`, payload).then((res) => res.data)
 }
 
 /**

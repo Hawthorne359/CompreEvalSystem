@@ -24,10 +24,10 @@
         <input
           type="checkbox"
           class="h-3.5 w-3.5 shrink-0 cursor-pointer rounded"
-          :checked="allFieldKeys.length > 0 && allFieldKeys.every((k) => selectedKeys.has(k))"
+          :checked="selectableKeys.length > 0 && selectableKeys.every((k) => selectedKeys.has(k))"
           :indeterminate.prop="
-            allFieldKeys.some((k) => selectedKeys.has(k)) &&
-            !allFieldKeys.every((k) => selectedKeys.has(k))
+            selectableKeys.some((k) => selectedKeys.has(k)) &&
+            !selectableKeys.every((k) => selectedKeys.has(k))
           "
           @click.stop
           @change="onToggleSelectAll"
@@ -57,7 +57,7 @@
         class="ml-2 shrink-0 rounded px-2 py-0.5 text-xs"
         :class="depth === 0 ? 'text-white/80 hover:bg-white/10 hover:text-white' : 'text-brand-600 hover:bg-brand-50 hover:text-brand-800'"
         @click.stop="onAddCommon"
-      >{{ depth === 0 ? '全选本模块' : '直接加入常用' }}</button>
+      >{{ depth === 0 ? '加入本模块常用' : '直接加入常用' }}</button>
     </div>
 
     <!-- Expanded content -->
@@ -69,8 +69,9 @@
         :node="child"
         :depth="depth + 1"
         :selected-keys="selectedKeys"
-        @toggle-field="$emit('toggle-field', $event)"
-        @add-common="$emit('add-common', $event)"
+        @toggle-field="(...args) => $emit('toggle-field', ...args)"
+        @add-common="(...args) => $emit('add-common', ...args)"
+        @toggle-common="(...args) => $emit('toggle-common', ...args)"
       />
 
       <!-- Fields belonging directly to this node -->
@@ -99,7 +100,7 @@
               class="rounded bg-brand-100 px-1 text-xs text-brand-700"
             >汇总</span>
             <span
-              v-else-if="f.is_common"
+              v-if="f.is_common"
               class="rounded bg-green-100 px-1 text-xs text-green-700"
             >常用</span>
             <span class="min-w-0 truncate text-sm text-slate-700">{{ f.label }}</span>
@@ -109,7 +110,15 @@
               :title="FIELD_TOOLTIPS[f.split_type]"
             >ⓘ</span>
           </div>
-          <code class="ml-2 shrink-0 select-all rounded bg-slate-200 px-1.5 py-0.5 text-xs text-slate-500">{{ f.key }}</code>
+          <div class="ml-2 flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              class="rounded px-1 py-0.5 text-xs"
+              :class="f.is_common ? 'bg-amber-100 text-amber-700 hover:bg-amber-200' : 'bg-slate-200 text-slate-600 hover:bg-slate-300'"
+              @click.stop="$emit('toggle-common', f.key)"
+            >{{ f.is_common ? '取消常用' : '设为常用' }}</button>
+            <code class="select-all rounded bg-slate-200 px-1.5 py-0.5 text-xs text-slate-500">{{ f.key }}</code>
+          </div>
         </div>
       </div>
     </div>
@@ -125,7 +134,7 @@ const props = defineProps({
   selectedKeys: { type: Set, required: true },
 })
 
-const emit = defineEmits(['toggle-field', 'add-common'])
+const emit = defineEmits(['toggle-field', 'add-common', 'toggle-common'])
 
 // Default collapsed for depth-0 (root modules), expanded for deeper nodes when they have few fields
 const expanded = ref(false)
@@ -138,7 +147,7 @@ function collectAllKeys(n) {
   return keys
 }
 
-// Collect only is_common / agg_score field keys from this node and all descendants
+// Collect only recommended common/agg keys from this node and all descendants
 function collectCommonKeys(n) {
   const keys = []
   for (const f of n.fields || []) {
@@ -148,10 +157,10 @@ function collectCommonKeys(n) {
   return keys
 }
 
-const allFieldKeys = computed(() => collectAllKeys(props.node))
+const selectableKeys = computed(() => collectAllKeys(props.node))
 
 function onToggleSelectAll() {
-  const keys = collectCommonKeys(props.node)
+  const keys = selectableKeys.value
   const allSelected = keys.length > 0 && keys.every((k) => props.selectedKeys.has(k))
   for (const k of keys) {
     emit('toggle-field', k, allSelected ? 'deselect' : 'select')

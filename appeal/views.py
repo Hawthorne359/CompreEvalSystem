@@ -78,6 +78,7 @@ class AppealListAPIView(generics.ListAPIView):
     serializer_class = AppealSerializer
 
     def get_queryset(self):
+        from django.db.models import Q
         user = self.request.user
         qs = (Appeal.objects.all()
               .select_related('submission', 'submission__project', 'handler',
@@ -90,7 +91,6 @@ class AppealListAPIView(generics.ListAPIView):
             return qs
         level = get_user_level(user)
         if level >= 3:
-            # 院系主任：看自己负责院系学生的 + 上报给自己的
             from users.models import UserRole
             from org.models import Class
             dept_ids = list(
@@ -107,21 +107,21 @@ class AppealListAPIView(generics.ListAPIView):
             all_class_ids = list(set(class_ids_from_dept + scope_class_ids))
             if all_class_ids:
                 return qs.filter(
-                    submission__user__class_obj_id__in=all_class_ids
-                ) | qs.filter(escalated_to=user)
+                    Q(submission__user__class_obj_id__in=all_class_ids) | Q(escalated_to=user)
+                )
             return qs.filter(escalated_to=user)
         if level >= 2:
-            # 评审老师：看自己负责班级学生的申诉
             from users.models import UserRole
             scope_class_ids = list(
                 UserRole.objects.filter(user=user, scope_type='class')
                 .values_list('scope_id', flat=True)
             )
             if scope_class_ids:
-                return qs.filter(submission__user__class_obj_id__in=scope_class_ids)
-            return qs.filter(submission__user=user)
-        # 学生只看自己的
-        return qs.filter(submission__user=user)
+                return qs.filter(
+                    Q(submission__user__class_obj_id__in=scope_class_ids) | Q(submission__isnull=True, user__class_obj_id__in=scope_class_ids)
+                )
+            return qs.filter(Q(submission__user=user) | Q(user=user))
+        return qs.filter(Q(submission__user=user) | Q(user=user))
 
 
 class AppealCreateAPIView(APIView):
@@ -153,6 +153,7 @@ class AppealCreateAPIView(APIView):
                 return Response({'detail': '仅统一导入或评审打分类型的指标可以申诉'}, status=status.HTTP_400_BAD_REQUEST)
 
         appeal = Appeal.objects.create(
+            user=request.user,
             submission=sub,
             indicator=indicator,
             reason=reason,
@@ -182,6 +183,63 @@ class AppealCreateAPIView(APIView):
         return Response(AppealSerializer(appeal).data, status=status.HTTP_201_CREATED)
 
 
+class AppealIndependentCreateAPIView(APIView):
+    """POST /api/v1/appeals/independent/ 创建独立申诉（主题+内容+附件，不关联具体提交/指标）。"""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        title = (request.data.get('title') or '').strip()
+        reason = (request.data.get('reason') or '').strip()
+        if not title:
+            return Response({'detail': '请填写申诉主题'}, status=status.HTTP_400_BAD_REQUEST)
+        if not reason:
+            return Response({'detail': '请填写申诉内容'}, status=status.HTTP_400_BAD_REQUEST)
+
+        submission_id = request.data.get('submission_id')
+        submission = None
+        if submission_id:
+            from submission.models import StudentSubmission
+            try:
+                submission = StudentSubmission.objects.get(pk=submission_id, user=request.user)
+            except StudentSubmission.DoesNotExist:
+                return Response({'detail': '关联提交不存在或无权限'}, status=status.HTTP_400_BAD_REQUEST)
+
+        appeal = Appeal.objects.create(
+            title=title,
+            user=request.user,
+            submission=submission,
+            indicator=None,
+            reason=reason,
+            original_submission_status=submission.status if submission else '',
+            status='pending',
+        )
+        if submission:
+            submission.status = 'appealing'
+            submission.save(update_fields=['status'])
+
+        files = request.FILES.getlist('files')
+        for file_obj in files:
+            AppealAttachment.objects.create(
+                appeal=appeal,
+                file=file_obj,
+                name=getattr(file_obj, 'name', '') or '',
+                uploaded_by=request.user,
+            )
+        log_action(
+            user=request.user,
+            action='appeal_independent_create',
+            module=OperationLog.MODULE_APPEAL,
+            level=OperationLog.LEVEL_NOTICE,
+            target_type='appeal',
+            target_id=appeal.id,
+            target_repr=title,
+            extra={'submission_id': submission.id if submission else None},
+            request=request,
+        )
+        return Response(AppealSerializer(appeal).data, status=status.HTTP_201_CREATED)
+
+
 class AppealAttachmentUploadAPIView(APIView):
     """POST /api/v1/appeals/<id>/attachments/ 上传申诉附件（仅申诉人、pending）。"""
     permission_classes = [IsAuthenticated]
@@ -192,7 +250,8 @@ class AppealAttachmentUploadAPIView(APIView):
             appeal = Appeal.objects.select_related('submission').get(pk=pk)
         except Appeal.DoesNotExist:
             return Response({'detail': '申诉不存在'}, status=status.HTTP_404_NOT_FOUND)
-        if appeal.submission.user_id != request.user.id:
+        appeal_user_id = appeal.user_id or (appeal.submission.user_id if appeal.submission_id else None)
+        if appeal_user_id != request.user.id:
             return Response({'detail': '仅申诉人可上传附件'}, status=status.HTTP_403_FORBIDDEN)
         if appeal.status != 'pending':
             return Response({'detail': '仅待处理申诉可上传附件'}, status=status.HTTP_400_BAD_REQUEST)
@@ -244,9 +303,10 @@ class AppealDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         return AppealSerializer
 
     def get_queryset(self):
+        from django.db.models import Q
         user = self.request.user
         qs = Appeal.objects.all().select_related(
-            'submission', 'handler', 'indicator', 'escalated_to'
+            'submission', 'handler', 'indicator', 'escalated_to', 'user'
         )
         if user_is_admin(user):
             return qs
@@ -267,7 +327,9 @@ class AppealDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
             )
             all_class_ids = list(set(class_ids_from_dept + scope_class_ids))
             if all_class_ids:
-                return qs.filter(submission__user__class_obj_id__in=all_class_ids) | qs.filter(escalated_to=user)
+                return qs.filter(
+                    Q(submission__user__class_obj_id__in=all_class_ids) | Q(escalated_to=user) | Q(user__class_obj_id__in=all_class_ids)
+                )
             return qs.filter(escalated_to=user)
         if level >= ROLE_LEVEL_COUNSELOR:
             from users.models import UserRole
@@ -276,15 +338,18 @@ class AppealDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
                 .values_list('scope_id', flat=True)
             )
             if scope_class_ids:
-                return qs.filter(submission__user__class_obj_id__in=scope_class_ids) | qs.filter(escalated_to=user)
-            return qs.filter(submission__user=user) | qs.filter(escalated_to=user)
-        return qs.filter(submission__user=user)
+                return qs.filter(
+                    Q(submission__user__class_obj_id__in=scope_class_ids) | Q(escalated_to=user) | Q(user__class_obj_id__in=scope_class_ids)
+                )
+            return qs.filter(Q(submission__user=user) | Q(user=user))
+        return qs.filter(Q(submission__user=user) | Q(user=user))
 
     def perform_update(self, serializer):
         if serializer.instance.status != 'pending':
             from rest_framework.exceptions import ValidationError
             raise ValidationError({'detail': '仅待处理状态可修改或撤回'})
-        if serializer.instance.submission.user_id != self.request.user.id:
+        appeal_user_id = serializer.instance.user_id or (serializer.instance.submission.user_id if serializer.instance.submission_id else None)
+        if appeal_user_id != self.request.user.id:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('仅本人可修改')
         serializer.save()
@@ -294,20 +359,22 @@ class AppealDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         if instance.status != 'pending':
             from rest_framework.exceptions import ValidationError
             raise ValidationError({'detail': '仅待处理状态可撤回'})
-        if instance.submission.user_id != self.request.user.id:
+        appeal_user_id = instance.user_id or (instance.submission.user_id if instance.submission_id else None)
+        if appeal_user_id != self.request.user.id:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('仅本人可撤回')
         submission = instance.submission
         instance_id = instance.id
         restore_status = instance.original_submission_status or ''
         instance.delete()
-        if restore_status not in {'draft', 'submitted', 'under_review', 'approved', 'rejected', 'appealing'}:
-            restore_status = 'approved' if submission.final_score is not None else 'under_review'
-        submission.status = restore_status
-        submission.save(update_fields=['status'])
-        if restore_status == 'submitted':
-            from scoring.assignment_services import auto_assign_submission
-            auto_assign_submission(submission)
+        if submission:
+            if restore_status not in {'draft', 'submitted', 'under_review', 'approved', 'rejected', 'appealing'}:
+                restore_status = 'approved' if submission.final_score is not None else 'under_review'
+            submission.status = restore_status
+            submission.save(update_fields=['status'])
+            if restore_status == 'submitted':
+                from scoring.assignment_services import auto_assign_submission
+                auto_assign_submission(submission)
         log_action(
             user=self.request.user,
             action='appeal_withdraw',

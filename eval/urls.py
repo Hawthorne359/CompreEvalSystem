@@ -21,7 +21,12 @@ urlpatterns = [
     path('projects/<int:project_id>/weight-rule/', views.ProjectWeightRuleView.as_view(), name='project-weight-rule'),
     path('projects/<int:project_id>/review-rule/', views.ProjectReviewRuleView.as_view(), name='project-review-rule'),
     path('projects/<int:project_id>/import-config/', views.ProjectImportConfigView.as_view(), name='project-import-config'),
+    path('projects/<int:project_id>/report-visibility/', views.ProjectReportVisibilityConfigView.as_view(), name='project-report-visibility'),
     path('project-config-templates/', views.ProjectConfigTemplateListAPIView.as_view(), name='project-config-template-list'),
+    path('project-config-templates/<int:template_id>/', views.ProjectConfigTemplateDetailAPIView.as_view(), name='project-config-template-detail'),
+    path('project-config-templates/import/', views.ProjectConfigTemplateImportAPIView.as_view(), name='project-config-template-import'),
+    path('project-config-templates/<int:template_id>/export/', views.ProjectConfigTemplateExportAPIView.as_view(), name='project-config-template-export'),
     path('projects/<int:project_id>/config-templates/save/', views.ProjectConfigTemplateSaveAPIView.as_view(), name='project-config-template-save'),
+    path('projects/<int:project_id>/config-templates/export/', views.ProjectConfigExportDirectAPIView.as_view(), name='project-config-template-export-direct'),
     path('projects/<int:project_id>/config-templates/<int:template_id>/apply/', views.ProjectConfigTemplateApplyAPIView.as_view(), name='project-config-template-apply'),
 ]
